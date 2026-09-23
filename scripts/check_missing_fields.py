@@ -153,6 +153,43 @@ def parse_first_json(text: str) -> dict:
     return obj
 
 
+# ── 当日去重锁 ──────────────────────────────────────────────
+# 保证「每天只推送一次」：即使任务被重试、手动补跑或多人共用同一环境，
+# 同一天内也只推送第一条，后续运行只做校验、不再发消息。
+LOCK_DIR = os.path.expanduser(os.getenv("CHECK_LOCK_DIR", "~/.cache/intake-check"))
+LOCK_FILE = os.path.join(LOCK_DIR, "send-state.json")
+
+
+def _load_state(lock_file: str) -> dict:
+    try:
+        with open(lock_file, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def already_sent_today(today: str, lock_file: str = LOCK_FILE) -> tuple[bool, str]:
+    """检查今天是否已经推送过。返回 (是否已推送, 上次推送时间)。"""
+    state = _load_state(lock_file)
+    if state.get("last_sent_date") == today:
+        return True, state.get("last_sent_at", "")
+    return False, ""
+
+
+def mark_sent_today(today: str, at: str, msg_id: str = "",
+                    lock_file: str = LOCK_FILE) -> None:
+    """记录今天已推送，写入去重锁。"""
+    os.makedirs(os.path.dirname(lock_file) or ".", exist_ok=True)
+    state = _load_state(lock_file)
+    state["last_sent_date"] = today
+    state["last_sent_at"] = at
+    state["last_msg_id"] = msg_id
+    tmp = lock_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, lock_file)   # 原子写入，避免并发读到半截文件
+
+
 def resolve_file_id(table_url: str, explicit_file_id: str | None = None) -> str:
     """从在线表格链接解析 file_id。"""
     if explicit_file_id:
@@ -351,6 +388,10 @@ def main(argv=None) -> int:
     parser.add_argument("--from-json", help="离线模式：从已保存的 range-data JSON 读取")
     parser.add_argument("--no-fast-path", action="store_true",
                         help="禁用快速通道，强制走「解析链接 → 查工作表 → 拉数」完整链路")
+    parser.add_argument("--force", action="store_true",
+                        help="忽略当日去重锁，强制推送（用于人工重发）")
+    parser.add_argument("--lock-file", default=LOCK_FILE,
+                        help=f"去重锁文件路径（默认 {LOCK_FILE}）")
     parser.add_argument("--dry-run", action="store_true", help="只校验不推送")
     parser.add_argument("--save-json", help="把本次拉取的 range-data 存到该路径，便于回放")
     args = parser.parse_args(argv)
@@ -395,7 +436,7 @@ def main(argv=None) -> int:
     print(message)
     print("=" * 60)
 
-    # 4) 推送
+    # 4) 推送（含「当日只推一次」去重保护）
     if args.dry_run or not args.webhook:
         if not args.webhook and not args.dry_run:
             print("\n⚠️ 未提供 --webhook，已跳过推送。")
@@ -403,8 +444,21 @@ def main(argv=None) -> int:
             print("\n[DRY-RUN] 已跳过推送。")
         return 0
 
+    today = datetime.now().strftime("%Y-%m-%d")
+    lock_file = args.lock_file
+
+    if not args.force:
+        sent, at = already_sent_today(today, lock_file)
+        if sent:
+            print(f"\n⏭️  今日（{today}）已于 {at} 推送过，跳过本次推送，避免重复打扰。")
+            print("   如需强制重发，加 --force。")
+            return 0
+
     resp = send_to_yzj(args.webhook, message)
-    print(f"\n✅ 已推送到群：msgId={resp.get('data', {}).get('msgId')}")
+    msg_id = resp.get("data", {}).get("msgId", "")
+    mark_sent_today(today, datetime.now().strftime("%Y-%m-%d %H:%M"), msg_id, lock_file)
+    print(f"\n✅ 已推送到群：msgId={msg_id}")
+    print(f"   已记录去重锁：{lock_file}（今日不再重复推送）")
     return 0
 
 

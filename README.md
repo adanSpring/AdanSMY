@@ -51,9 +51,27 @@ YZJ_WEBHOOK="https://www.yunzhijia.com/gateway/robot/webhook/send?yzjtype=0&yzjt
 | `--file-id` | 直接指定 file_id，跳过链接解析 | 内置默认值 / 环境变量 `KDOCS_FILE_ID` |
 | `--sheet-id` | 工作表 id | `3`（`项目对接清单`） |
 | `--no-fast-path` | 禁用快速通道，强制走完整解析链路 | 关闭 |
+| `--force` | 忽略当日去重锁，强制推送（人工重发用） | 关闭 |
+| `--lock-file` | 去重锁文件路径 | `~/.cache/intake-check/send-state.json` |
 | `--from-json` | 离线模式：从已保存的 range-data JSON 读取 | — |
 | `--dry-run` | 只校验不推送 | 关闭 |
 | `--save-json` | 保存本次拉取的数据，便于回放核对 | — |
+
+## 每天只推送一次
+
+脚本内置**当日去重锁**：推送成功后记录日期，当天再次运行会直接跳过推送。
+
+| 场景 | 行为 |
+|---|---|
+| 每天 17:00 正常触发 | 推送 1 条 |
+| 任务重试 / 补跑 / 手动触发 | **跳过推送**，群里无重复消息 |
+| 跨天后再次运行 | 自动恢复推送 |
+| 需要人工重发 | 加 `--force` |
+
+```bash
+# 人工强制重发
+python3 scripts/check_missing_fields.py --force
+```
 
 ## 性能
 
