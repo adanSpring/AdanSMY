@@ -1,15 +1,15 @@
 ---
 name: kdocs-missing-fields-check
-version: 1.1.0
+version: 1.2.0
 display_name: 业务组对接表填写异常巡检
 display_name_en: Business Intake Sheet Completeness Check
 description: >
   巡检金山文档在线表格「集团信息化 业务技术项目对接表」的「项目对接清单」工作表，
-  逐行校验需求填写完整性（7 项必填 + 至少填一项），把异常按负责人汇总后推送到云之家群机器人。
-  当需要「检查业务组需求填写是否完整」「催办未填完整的对接表」「每天巡检对接清单并群里提醒」
-  时使用本 Skill。
-description_zh: 逐行校验在线对接表填写完整性，异常按负责人汇总后推送到云之家群；无异常则静默不发。
-description_en: Validate every row of the online intake sheet, aggregate issues by owner, and push a notice to the Yunzhijia group; stays silent when nothing is wrong.
+  逐行校验需求填写完整性（7 项必填 + 至少填一项）：有异常则按负责人汇总推送到云之家群机器人，
+  无异常则推送一条「今日无异常」小红花通报。当需要「检查业务组需求填写是否完整」
+  「催办未填完整的对接表」「每天巡检对接清单并群里提醒」时使用本 Skill。
+description_zh: 逐行校验在线对接表填写完整性，异常按负责人汇总推送到云之家群；无异常则推送小红花通报。
+description_en: Validate every row of the online intake sheet and push an aggregated notice to the Yunzhijia group; when nothing is wrong, send a short "all clear" note instead.
 license: MIT
 allowed-tools: Bash, Read
 ---
@@ -17,7 +17,8 @@ allowed-tools: Bash, Read
 # 业务组对接表填写异常巡检
 
 对金山文档在线表格「集团信息化 业务技术项目对接表」（`项目对接清单` 工作表）做**逐行完整性巡检**，
-把填写不完整的行按负责人汇总，渲染成固定模板推送到云之家群机器人；**全部填写完整时不发送任何消息**。
+有异常时按负责人汇总渲染成固定模板推送到云之家群机器人；
+**无异常时推送一条「今日无异常」小红花通报**（每天必有一条消息，用于确认巡检确实跑过）。
 
 ## 校验规则
 
@@ -33,7 +34,7 @@ allowed-tools: Bash, Read
 - 异常行 **有需求负责人** → 按负责人归并，输出 `负责人：N行需求填写不完整；`，**同一负责人只出现一次**
 - 异常行 **无需求负责人** → 输出 `第N行：1行需求填写不完整；`，**不连续的行各自单列，不合并**
 - 消息开头**逐行艾特**所有有异常的负责人：`@顾晓双 @窦舒亚 @刘文彬`
-- **无异常 → 不发送消息**
+- **两种结果都会推送**：有异常 → 异常提醒；无异常 → 小红花通报（见下方模板）
 
 ## 每天只推送一次（当日去重锁 + 并发互斥）
 
@@ -85,6 +86,8 @@ allowed-tools: Bash, Read
 
 ## 消息模板（固定，不得增删版式）
 
+### 模板 A —— 有异常（异常提醒）
+
 ```
 【业务组技术对接表填写异常提醒】
 在线表格：https://www.kdocs.cn/l/cchYxqp30FkG
@@ -105,6 +108,24 @@ allowed-tools: Bash, Read
 ```
 
 > `共 N 条需求` 为**实时统计**结果，会随表格增删自动变化，**不是**写死的常量。
+
+### 模板 B —— 无异常（小红花通报）
+
+```
+【业务组技术对接表填写异常提醒】
+在线表格：https://www.kdocs.cn/l/cchYxqp30FkG
+对接清单：共 {实时统计} 条需求
+检查时间：YYYY-MM-DD HH:MM
+
+业务组表现优异，今日无异常，奖励一朵小红花🌹
+```
+
+无异常模板**没有** `@` 艾特行，也**没有**「异常结果」「异常检查规则」两段 —— 只有头部 4 行 + 1 个空行 + 1 句褒奖。
+
+`🌹` 在代码里以 `FLOWER = "\U0001F339"` 形式写死，避免不同编辑器或编码转换环节把 emoji 弄丢。
+
+> **为什么无异常也要发消息**：如果无异常就静默，那么「今天任务挂了」和「今天刚好没问题」
+> 在群里看起来完全一样 —— 沉默无法自证。每天必有一条消息，恰恰让**沉默本身**成为告警信号。
 
 ## 前置条件
 
@@ -239,4 +260,13 @@ CLI 有时会在 JSON 后追加 `⚠ kdocs-cli vX.Y.Z available...`，
 注意：请尽快完善业务组需求文档的补充；
 ```
 
-**无异常时**：脚本输出 `✅ 全部填写完整，无异常，不发送消息。`，群内**静默**。
+**无异常时**（推送到群）：
+
+```
+【业务组技术对接表填写异常提醒】
+在线表格：https://www.kdocs.cn/l/cchYxqp30FkG
+对接清单：共 126 条需求
+检查时间：2026-09-24 17:00
+
+业务组表现优异，今日无异常，奖励一朵小红花🌹
+```

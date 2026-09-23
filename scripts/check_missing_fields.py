@@ -120,6 +120,9 @@ SEND_BACKOFF = 3          # 秒；退避 3s → 6s → 9s
 
 _BLANK_CHARS = ("\u200b", "\u200c", "\u200d", "\ufeff", "\xa0", "\u3000", "\r", "\n", "\t")
 
+# 无异常通报用的花 —— 用 unicode 转义写死，避免不同编辑器/编码环节把字符弄丢
+FLOWER = "\U0001F339"     # 🌹
+
 
 # ── 工具函数 ────────────────────────────────────────────────
 def norm(value) -> str:
@@ -414,11 +417,25 @@ def check_rows(cells, now: datetime | None = None) -> dict:
 
 
 def render_message(result: dict, table_url: str) -> str | None:
-    """按约定模板渲染群消息文本；无异常返回 None（不发送）。"""
+    """按约定模板渲染群消息文本。
+
+    - 有异常 → 渲染「异常提醒」模板
+    - 无异常 → 渲染「表现优异」模板（每日必发一条，用于确认巡检确实跑过）
+    """
     owner_map = result["owner_map"]
     no_owner_rows = result["no_owner_rows"]
+
     if not owner_map and not no_owner_rows:
-        return None
+        # 无异常：发一条「小红花」通报。
+        # 好处是每天必有一条消息 —— 群里看不到消息就知道任务挂了，而不是「今天刚好没问题」。
+        return "\n".join([
+            "【业务组技术对接表填写异常提醒】",
+            f"在线表格：{table_url}",
+            f"对接清单：共 {result['total']} 条需求",
+            f"检查时间：{result['check_time']}",
+            "",
+            f"业务组表现优异，今日无异常，奖励一朵小红花{FLOWER}",
+        ])
 
     lines = [
         "【业务组技术对接表填写异常提醒】",
@@ -588,6 +605,7 @@ def main(argv=None) -> int:
 
     # 2) 校验
     result = check_rows(cells)
+    has_issue = bool(result["owner_map"] or result["no_owner_rows"])
     print(f"有效需求条数：{result['total']}")
     print(f"异常行数：{len(result['abnormal'])}")
     if result["owner_map"]:
@@ -595,15 +613,17 @@ def main(argv=None) -> int:
     if result["no_owner_rows"]:
         print("无负责人异常行：" + "、".join(f"第{r}行" for r in result["no_owner_rows"]))
 
-    # 3) 渲染
+    # 3) 渲染（有异常 → 异常提醒；无异常 → 小红花通报。两种情况都要发）
     message = render_message(result, args.table_url)
     if message is None:
-        print("\n✅ 全部填写完整，无异常，不发送消息。")
+        # 只有 total=0 这类极端情况才会走到这里：没读到任何需求行，不发消息
+        print("\n⚠️ 未统计到任何需求行，不发送消息。")
         return 0
 
     print("\n" + "=" * 60)
     print(message)
     print("=" * 60)
+    print("\n[模式] " + ("异常提醒" if has_issue else "无异常通报（小红花）"))
 
     # 4) 推送（含「当日只推一次」去重保护）
     if args.dry_run or not args.webhook:
