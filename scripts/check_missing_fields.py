@@ -46,12 +46,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
-import re
 import subprocess
 import sys
-import tempfile
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 # ── 默认配置 ────────────────────────────────────────────────
@@ -93,9 +95,28 @@ ANY_OF_COLS = (COL_BG, COL_DESC)
 HEADER_ROW_INDEX = 1
 DATA_START_INDEX = 2
 
-# 扫描的最大行数（表格实际数据到第 127 行附近，留足余量）
-MAX_SCAN_ROW = 3000
-MAX_SCAN_COL = 9      # 0-based，即到 J 列
+# ── 表头校验：列号 → 期望表头文案 ──────────────────────────
+# 每次运行都会核对，防止有人在表格里插入/移动列导致校验错位却静默发出错误结果。
+EXPECTED_HEADERS = {
+    COL_SYSTEM: "系统名称",
+    COL_MODULE: "所属系统/模块",
+    COL_BRANCH: "提出分公司",
+    COL_PROPOSER: "需求提出人",
+    COL_OWNER: "需求负责人",
+    COL_DATE: "提出日期",
+    COL_BG: "业务背景与痛点",
+    COL_DESC: "需求描述与业务价值",
+    COL_PRIORITY: "需求优先级",
+}
+
+# 扫描范围
+MAX_SCAN_ROW = 3000       # 兜底上限（正常会被动态探测的行数覆盖）
+MAX_SCAN_COL = 9          # 0-based，即到 J 列
+PROBE_ROWS = 20           # 探测实际行数时读取的行数窗口
+
+# 推送重试
+SEND_RETRIES = 3
+SEND_BACKOFF = 3          # 秒；退避 3s → 6s → 9s
 
 _BLANK_CHARS = ("\u200b", "\u200c", "\u200d", "\ufeff", "\xa0", "\u3000", "\r", "\n", "\t")
 
@@ -127,21 +148,97 @@ def build_grid(cells) -> dict:
     return grid
 
 
+class HeaderMismatch(RuntimeError):
+    """表头与预期不符 —— 说明表格结构变了，必须人工介入，绝不能继续校验。"""
+
+
+def verify_headers(cells) -> list[str]:
+    """核对表头文案，返回问题列表（空列表表示通过）。
+
+    若有人在表格里插入/移动/重命名列，列索引会整体错位。此时若继续按固定
+    列号校验，会把「技术对接人」当成「需求负责人」，静默产出**错误**的异常
+    名单 —— 比任务直接失败更危险。因此这里做强制拦截。
+    """
+    grid = build_grid(cells)
+    header_row = grid.get(HEADER_ROW_INDEX, {})
+    if not header_row:
+        raise HeaderMismatch(
+            f"第 {HEADER_ROW_INDEX + 1} 行未读到表头，表格结构可能已变更。"
+        )
+
+    problems = []
+    for col, expected in sorted(EXPECTED_HEADERS.items()):
+        actual = norm(header_row.get(col, ""))
+        if actual != expected:
+            col_letter = chr(ord("A") + col)
+            problems.append(
+                f"{col_letter} 列：期望「{expected}」，实际「{actual or '（空）'}」"
+            )
+    return problems
+
+
+def detect_last_row(file_id: str, sheet_id: int) -> int:
+    """动态探测数据区实际最后一行（0-based），避免固定拉取 3000 行的浪费。"""
+    payload = {
+        "file_id": file_id,
+        "sheetId": sheet_id,
+        "range": {"rowFrom": 0, "rowTo": PROBE_ROWS, "colFrom": 0, "colTo": MAX_SCAN_COL},
+    }
+    try:
+        out = run_kdocs(
+            ["sheet", "get-range-data", json.dumps(payload, ensure_ascii=False),
+             "--silent", "--compact"],
+            timeout=60,
+        )
+        obj = parse_first_json(out)
+        detail = obj.get("detail") or obj.get("data", {}).get("detail", {})
+        rows = [int(c["originRow"]) for c in detail.get("rangeData", [])
+                if c.get("originRow") is not None]
+        if rows:
+            # 探测窗口内最大行 + 余量，留出表格增长空间
+            return min(max(rows) + 200, MAX_SCAN_ROW)
+    except Exception:  # noqa: BLE001 - 探测失败就退回全量上限，不影响主流程
+        pass
+    return MAX_SCAN_ROW
+
+
 def run_kdocs(args: list[str], timeout: int = 120) -> str:
-    """调用 kdocs-cli 并返回 stdout。"""
+    """调用 kdocs-cli 并返回 stdout。
+
+    若 kdocs-cli 不在 PATH 中，会尝试几个常见安装位置后再报错。
+    """
+    exe = _find_kdocs_cli()
     try:
         proc = subprocess.run(
-            ["kdocs-cli", *args],
+            [exe, *args],
             capture_output=True, text=True, timeout=timeout,
         )
     except FileNotFoundError:
         raise RuntimeError(
             "未找到 kdocs-cli。请先安装：bash scripts/setup.sh（金山文档 Skill 内置脚本），"
-            "或确认 PATH 已包含安装目录（默认 ~/.local/bin）。"
-        )
+            f"或确认 PATH 已包含安装目录（默认 ~/.local/bin）。当前 PATH={os.environ.get('PATH','')}"
+        ) from None
     if proc.returncode != 0:
         raise RuntimeError(f"kdocs-cli 执行失败（exit {proc.returncode}）：{proc.stderr.strip()[:500]}")
     return proc.stdout
+
+
+def _find_kdocs_cli() -> str:
+    """定位 kdocs-cli 可执行文件，兼容 PATH 未包含安装目录的情况。"""
+    import shutil
+
+    found = shutil.which("kdocs-cli")
+    if found:
+        return found
+    for cand in (
+        os.path.expanduser("~/.local/bin/kdocs-cli"),
+        "/usr/local/bin/kdocs-cli",
+        "/usr/bin/kdocs-cli",
+    ):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    # 都没找到：交回裸命令名，由 subprocess 抛 FileNotFoundError 统一报错
+    return "kdocs-cli"
 
 
 def parse_first_json(text: str) -> dict:
@@ -246,11 +343,13 @@ def fetch_with_fallback(table_url: str, sheet_id: int,
     """取数：优先走快速通道（已知 file_id），失败则回退到完整解析链路。
 
     快速通道省掉「解析链接」+「查工作表」两次 API 往返，实测约 2.2s → 1.1s。
+    行数先动态探测（避免固定拉 3000 行），探测失败则退回全量上限。
     返回 (cells, file_id)。
     """
     if file_id:
         try:
-            cells = fetch_all(file_id, sheet_id)
+            row_to = detect_last_row(file_id, sheet_id)
+            cells = fetch_all(file_id, sheet_id, row_to)
             if cells:
                 return cells, file_id
             print("⚠️ 快速通道返回空数据，回退到完整链路…", file=sys.stderr)
@@ -259,7 +358,8 @@ def fetch_with_fallback(table_url: str, sheet_id: int,
 
     resolved_id = resolve_file_id(table_url)
     real_sheet_id = find_sheet_id(resolved_id, sheet_name, None)
-    return fetch_all(resolved_id, real_sheet_id), resolved_id
+    row_to = detect_last_row(resolved_id, real_sheet_id)
+    return fetch_all(resolved_id, real_sheet_id, row_to), resolved_id
 
 
 # ── 核心校验 ────────────────────────────────────────────────
@@ -272,10 +372,14 @@ def check_rows(cells, now: datetime | None = None) -> dict:
 
     total = 0
     abnormal = []          # [(excel_row, owner, missing_fields)]
+    label = str(now.year - 1)
     for row_idx in data_rows:
         row = grid.get(row_idx, {})
         # 整行（A~J）全空 → 非需求行，跳过且不计入总数
         if all(norm(row.get(c, "")) == "" for c in range(MAX_SCAN_COL + 1)):
+            continue
+        # 上一自然年的数据属于历史归档，不再催办
+        if label in str(row.get(COL_DATE, "")):
             continue
         total += 1
 
@@ -349,10 +453,8 @@ def render_message(result: dict, table_url: str) -> str | None:
 
 
 # ── 推送 ────────────────────────────────────────────────────
-def send_to_yzj(webhook: str, content: str, timeout: int = 30) -> dict:
-    """推送文本到云之家群机器人。"""
-    import urllib.request
-
+def _post_once(webhook: str, content: str, timeout: int = 30) -> dict:
+    """单次推送尝试。"""
     body = json.dumps({"content": content}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=body,
@@ -366,8 +468,60 @@ def send_to_yzj(webhook: str, content: str, timeout: int = 30) -> dict:
     except json.JSONDecodeError:
         parsed = {"raw": raw}
     if not parsed.get("success", parsed.get("errorCode") == 0):
-        raise RuntimeError(f"云之家推送失败：{raw[:300]}")
+        # 业务级失败（如 token 失效）——重试也没用，直接抛出让上层决定
+        raise SendFailed(f"云之家推送失败：{raw[:300]}")
     return parsed
+
+
+class SendFailed(RuntimeError):
+    """云之家推送失败（业务级，重试无意义）。"""
+
+
+@contextlib.contextmanager
+def _send_lock(lock_file: str):
+    """跨进程互斥，避免并发运行抢跑导致重复推送（LOCK_NB 抢不到就直接跳过）。"""
+    import fcntl
+
+    os.makedirs(os.path.dirname(lock_file) or ".", exist_ok=True)
+    fd = os.open(lock_file + ".pid", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def send_to_yzj(webhook: str, content: str, timeout: int = 30,
+                retries: int = SEND_RETRIES) -> tuple[dict, list[str]]:
+    """带重试退避的推送。返回 (响应, 告警列表)。
+
+    网络类错误（超时、连接失败）会重试；业务级失败（token 失效等）不重试。
+    全部失败时返回 (None, 告警)，**不抛异常**，避免任务因推送失败而整体崩溃。
+    """
+    warnings: list[str] = []
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        try:
+            return _post_once(webhook, content, timeout), warnings
+        except SendFailed as exc:
+            # 业务级失败：重试无意义
+            warnings.append(f"推送被拒（不重试）：{exc}")
+            return None, warnings
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+            if attempt < retries:
+                wait = SEND_BACKOFF * attempt
+                print(f"⚠️ 第 {attempt} 次推送失败（{last_err}），{wait}s 后重试…", file=sys.stderr)
+                time.sleep(wait)
+    warnings.append(f"推送失败（已重试 {retries} 次）：{last_err}")
+    return None, warnings
 
 
 # ── 主流程 ──────────────────────────────────────────────────
@@ -417,6 +571,21 @@ def main(argv=None) -> int:
         print("❌ 未读取到任何单元格数据，请检查表格链接、权限或网络。", file=sys.stderr)
         return 2
 
+    # 1.5) 表头校验 —— 表格结构漂移必须硬失败，绝不带着错误列映射继续跑。
+    try:
+        header_problems = verify_headers(cells)
+    except HeaderMismatch as exc:
+        print(f"❌ 表头校验失败：{exc}", file=sys.stderr)
+        print("   请人工确认表格列结构后再运行（本次不做任何校验与推送）。", file=sys.stderr)
+        return 4
+    if header_problems:
+        print("❌ 表头与预期不符，已中止（防止按错误列号产出错误名单）：", file=sys.stderr)
+        for p in header_problems:
+            print(f"   - {p}", file=sys.stderr)
+        print("   若确为表格改版，请更新脚本中的 EXPECTED_HEADERS / 列定义后重跑。",
+              file=sys.stderr)
+        return 4
+
     # 2) 校验
     result = check_rows(cells)
     print(f"有效需求条数：{result['total']}")
@@ -447,19 +616,35 @@ def main(argv=None) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     lock_file = args.lock_file
 
-    if not args.force:
-        sent, at = already_sent_today(today, lock_file)
-        if sent:
-            print(f"\n⏭️  今日（{today}）已于 {at} 推送过，跳过本次推送，避免重复打扰。")
-            print("   如需强制重发，加 --force。")
+    with _send_lock(lock_file) as acquired:
+        if not acquired:
+            print(f"\n⏭️  已有另一次巡检正在推送（锁 {lock_file}.pid 被占用），本次跳过。")
             return 0
 
-    resp = send_to_yzj(args.webhook, message)
-    msg_id = resp.get("data", {}).get("msgId", "")
-    mark_sent_today(today, datetime.now().strftime("%Y-%m-%d %H:%M"), msg_id, lock_file)
-    print(f"\n✅ 已推送到群：msgId={msg_id}")
-    print(f"   已记录去重锁：{lock_file}（今日不再重复推送）")
-    return 0
+        if not args.force:
+            sent, at = already_sent_today(today, lock_file)
+            if sent:
+                print(f"\n⏭️  今日（{today}）已于 {at} 推送过，跳过本次推送，避免重复打扰。")
+                print("   如需强制重发，加 --force。")
+                return 0
+
+        # 先占坑：写入当日锁再推送。
+        # 宁可「推失败但锁住了」（可人工 --force 补发），也不要「推成功了却没锁住」
+        # —— 后者在任务重试时会重复打扰群里所有人。
+        mark_sent_today(today, datetime.now().strftime("%Y-%m-%d %H:%M"), "", lock_file)
+
+        resp, warnings = send_to_yzj(args.webhook, message)
+        if resp is None:
+            for w in warnings:
+                print(f"❌ {w}", file=sys.stderr)
+            print("   已保留当日锁，如需人工补发请加 --force。", file=sys.stderr)
+            return 3
+
+        msg_id = resp.get("data", {}).get("msgId", "")
+        mark_sent_today(today, datetime.now().strftime("%Y-%m-%d %H:%M"), msg_id, lock_file)
+        print(f"\n✅ 已推送到群：msgId={msg_id}")
+        print(f"   已记录去重锁：{lock_file}（今日不再重复推送）")
+        return 0
 
 
 if __name__ == "__main__":
