@@ -1,0 +1,191 @@
+---
+name: kdocs-missing-fields-check
+version: 1.0.0
+display_name: 业务组对接表填写异常巡检
+display_name_en: Business Intake Sheet Completeness Check
+description: >
+  巡检金山文档在线表格「集团信息化 业务技术项目对接表」的「项目对接清单」工作表，
+  逐行校验需求填写完整性（7 项必填 + 至少填一项），把异常按负责人汇总后推送到云之家群机器人。
+  当需要「检查业务组需求填写是否完整」「催办未填完整的对接表」「每天巡检对接清单并群里提醒」
+  时使用本 Skill。
+description_zh: 逐行校验在线对接表填写完整性，异常按负责人汇总后推送到云之家群；无异常则静默不发。
+description_en: Validate every row of the online intake sheet, aggregate issues by owner, and push a notice to the Yunzhijia group; stays silent when nothing is wrong.
+license: MIT
+allowed-tools: Bash, Read
+---
+
+# 业务组对接表填写异常巡检
+
+对金山文档在线表格「集团信息化 业务技术项目对接表」（`项目对接清单` 工作表）做**逐行完整性巡检**，
+把填写不完整的行按负责人汇总，渲染成固定模板推送到云之家群机器人；**全部填写完整时不发送任何消息**。
+
+## 校验规则
+
+| 规则 | 内容 |
+|---|---|
+| **必填项（7 项，缺任一即为异常）** | 系统名称、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期 |
+| **至少填一项（2 项全空即为异常）** | 业务背景与痛点、需求描述与业务价值 |
+
+逐行检查，命中任一条件即判定该行为异常。
+
+## 汇总与展示规则
+
+- 异常行 **有需求负责人** → 按负责人归并，输出 `负责人：N行需求填写不完整；`，**同一负责人只出现一次**
+- 异常行 **无需求负责人** → 输出 `第N行：1行需求填写不完整；`，**不连续的行各自单列，不合并**
+- 消息开头**逐行艾特**所有有异常的负责人：`@顾晓双 @窦舒亚 @刘文彬`
+- **无异常 → 不发送消息**
+
+## 消息模板（固定，不得增删版式）
+
+```
+【业务组技术对接表填写异常提醒】
+在线表格：https://www.kdocs.cn/l/cchYxqp30FkG
+对接清单：共 {实时统计} 条需求
+检查时间：YYYY-MM-DD HH:MM
+
+@负责人A @负责人B
+■ 异常结果
+负责人A：N行需求填写不完整；
+负责人B：N行需求填写不完整；
+第105行：1行需求填写不完整；
+
+■ 异常检查规则
+必填项：系统名称、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期；
+至少填一项：业务背景与痛点、需求描述与业务价值；
+
+注意：请尽快完善业务组需求文档的补充；
+```
+
+> `共 N 条需求` 为**实时统计**结果，会随表格增删自动变化，**不是**写死的常量。
+
+## 前置条件
+
+1. **金山文档授权**（读取表格）
+   ```bash
+   kdocs-cli auth status          # 需 authenticated: true
+   # 未授权时：
+   kdocs-cli auth login
+   ```
+   Token 有效期很长，但过期后需重新授权。
+
+2. **云之家群机器人 Webhook**（推送消息）
+   - 环境变量 `YZJ_WEBHOOK`，或命令行 `--webhook` 传入
+   - 形如 `https://www.yunzhijia.com/gateway/robot/webhook/send?yzjtype=0&yzjtoken=xxx`
+
+## 执行方式
+
+```bash
+# 完整流程：拉表 → 校验 → 有异常则推送（默认启用快速通道，约 0.7s）
+python3 scripts/check_missing_fields.py
+
+# 只校验不推送（调试用，推荐每次改完先跑这个）
+python3 scripts/check_missing_fields.py --dry-run
+
+# 强制走完整解析链路（快速通道异常时用于排查）
+python3 scripts/check_missing_fields.py --no-fast-path --dry-run
+
+# 显式指定表格与群机器人
+python3 scripts/check_missing_fields.py \
+  --table-url "https://www.kdocs.cn/l/cchYxqp30FkG" \
+  --webhook "$YZJ_WEBHOOK"
+
+# 离线回放：用已保存的 range-data JSON 复算，不联网
+python3 scripts/check_missing_fields.py --from-json ./samples/range_data.json --dry-run
+
+# 保存本次拉取的数据，便于事后核对
+python3 scripts/check_missing_fields.py --dry-run --save-json ./run-$(date +%F).json
+```
+
+### 快速通道与自动回退
+
+默认直接用内置 `file_id` 拉数，**省掉两次 API 往返**（约 3.2s → 0.7s）。
+若快速通道返回空或报错，脚本会打印 `⚠️ 快速通道失败…回退到完整链路` 并自动改用
+「解析链接 → 查工作表 → 拉数」的完整链路，**任务不会中断**。
+
+## 关键实现要点（排错必读）
+
+### 1. 稀疏单元格必须按坐标索引，不能按顺序对齐
+
+`kdocs-cli sheet get-range-data` 只返回**有值**的单元格，是一个稀疏数组：
+
+```json
+{"originRow": 95, "originCol": 5, "cellText": ""}
+```
+
+**必须**用 `originRow` / `originCol` 建立坐标索引：
+
+```python
+grid.setdefault(cell["originRow"], {})[cell["originCol"]] = cell["cellText"]
+```
+
+若按下标顺序对齐，或只做 `[:N]` 截断预览，会**整行错位**，得出完全错误的结论。
+（本项目开发时踩过这个坑：截断预览误判了一批行缺日期，按坐标核对后发现它们其实是完整的。）
+
+### 2. 行号口径 = Excel 真实行号
+
+- 0-based 索引 → Excel 行号：`excel_row = origin_row + 1`
+- 表结构：第 1 行分组标题（`【业务组填写】需求提出` 等），**第 2 行是表头**，**第 3 行起为数据**
+- 消息中的「第105行」指 **Excel 真实行号**，不是第 105 条需求
+
+### 3. 列位置（0-based）
+
+| 列 | 索引 | 字段 |
+|---|---|---|
+| A | 0 | 系统名称 |
+| B | 1 | 所属系统/模块 |
+| C | 2 | 提出分公司 |
+| D | 3 | 需求提出人 |
+| E | 4 | 需求负责人 |
+| F | 5 | 提出日期 |
+| G | 6 | 业务背景与痛点 |
+| H | 7 | 需求描述与业务价值 |
+| I | 8 | 需求优先级 |
+| J | 9 | 技术对接人 |
+
+### 4. 空值判定要归一化
+
+单元格可能含零宽字符、全角空格、换行等，需统一清洗后再判空，否则会把「看似空白实则有字符」的行误判为完整。
+
+### 5. kdocs-cli 输出尾部可能带升级提示
+
+CLI 有时会在 JSON 后追加 `⚠ kdocs-cli vX.Y.Z available...`，
+直接 `json.load()` 会报 `Extra data`。需用 `json.JSONDecoder().raw_decode()` 只取第一个 JSON 对象。
+
+### 6. 限频与熔断
+
+遇到 `429001`（限频）/ `429002`（熔断）时**立即停止请求**，按响应给出的恢复时间等待，禁止连续重试。
+
+## 常见错误速查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `authenticated: false` | Token 过期 | `kdocs-cli auth login` 重新授权 |
+| `range 须为对象` | `range` 传了字符串 | 必须是对象：`{"rowFrom":0,"rowTo":100,"colFrom":0,"colTo":9}` |
+| `未找到工作表「项目对接清单」` | 表名变更或 sheet_id 变化 | 用 `kdocs-cli sheet get-sheets-info` 查看实际表名，或用 `--sheet-id` 显式指定 |
+| 条数明显偏少 / 行号对不上 | 稀疏数组按下标对齐了 | 检查是否用 `originRow`/`originCol` 索引 |
+| `Extra data` 解析失败 | CLI 追加了升级提示 | 用 `raw_decode()` 取第一个 JSON |
+| 推送失败但校验正常 | Webhook 失效或群变更 | 重新获取群机器人 Webhook，或先在群里确认机器人是否被移除 |
+| 无异常却收到消息 | 空值判定未归一化 | 检查零宽字符 / 全角空格清洗逻辑 |
+
+## 输出示例
+
+**有异常时**（推送到群）：
+
+```
+【业务组技术对接表填写异常提醒】
+在线表格：https://www.kdocs.cn/l/cchYxqp30FkG
+对接清单：共 125 条需求
+检查时间：2026-09-23 14:36
+
+@张朝伟
+■ 异常结果
+张朝伟：1行需求填写不完整；
+
+■ 异常检查规则
+必填项：系统名称、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期；
+至少填一项：业务背景与痛点、需求描述与业务价值；
+
+注意：请尽快完善业务组需求文档的补充；
+```
+
+**无异常时**：脚本输出 `✅ 全部填写完整，无异常，不发送消息。`，群内**静默**。
