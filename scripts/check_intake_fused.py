@@ -648,15 +648,15 @@ def _render_collect(result: dict) -> str:
       - 有异常 → @相应负责人 + ■ 异常结果 + ■ 异常检查规则
       - 无异常 → 只输出「小红花」一句（不显示异常检查规则）
     """
-    lines = ["一、【需求收集阶段】异常通报"]
+    lines = ["一、【需求收集阶段】异常通报", ""]
 
     owner_map = result["owner_map"]
     no_owner_rows = result["no_owner_rows"]
     has_any = bool(owner_map or no_owner_rows)
 
     if not has_any:
-        # 红花前后各空一行
-        lines += ["", FLOWER_NOTE_COLLECT, ""]
+        # 标题后已有空行，这里只补红花「后」的空行
+        lines += [FLOWER_NOTE_COLLECT, ""]
         return "\n".join(lines)
 
     at_names = list(owner_map)
@@ -688,15 +688,15 @@ def _render_tech_stage(result: dict) -> str:
       - 有异常 → ■ 异常结果（逐条规则差异）
       - 无异常 → 只输出「小红花」一句
     """
-    lines = ["二、【技术评估/开发阶段】异常通报"]
+    lines = ["二、【技术评估/开发阶段】异常通报", ""]
 
     has_any = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
         result["tech_no_done"], result["tech_overdue"], result["tech_reject"],
     ])
     if not has_any:
-        # 红花前后各空一行
-        lines += ["", FLOWER_NOTE_TECH, ""]
+        # 标题后已有空行，这里只补红花「后」的空行
+        lines += [FLOWER_NOTE_TECH, ""]
         return "\n".join(lines)
 
     lines.append("■ 异常结果")
@@ -767,7 +767,7 @@ def _render_accept_stage(result: dict) -> str:
         result["acc_redo"], result["acc_undecided"], result["acc_leader"],
     ])
     if not has_any:
-        # 红花前后各空一行
+        # 统计块与红花之间空一行，保持三段结构统一
         lines += ["", FLOWER_NOTE_ACCEPT, ""]
         return "\n".join(lines)
 
