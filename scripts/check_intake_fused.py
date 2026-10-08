@@ -14,6 +14,49 @@
 
 三段均无异常时，一、二段显示「小红花」，三段输出统计块 + 「小红花」，整条消息仍会推送。
 
+第一段：业务组填写完整性
+------------------------
+1. 必填项：系统名称、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期
+2. 至少填一项：业务背景与痛点、需求描述与业务价值
+逐行检查，不满足任一条即为异常。
+- 异常行若「需求负责人」有值 → 按负责人合并成一行，同行艾特并带行号后缀：
+   「@张三：N行需求填写不完整（第2、4、5行）；」（同一负责人只出现一次）
+- 异常行若「需求负责人」为空 → 合并成一条，艾特逄浩、原潮（顿号连接）并带行号后缀：
+   「@逄浩、@原潮：N行需求填写不完整（第3、8行）；」
+- 行号统一用 _rows_suffix() 渲染：一个「第」起头、顿号连列、末尾一个「行」。
+
+第二段：技术组填报异常（5 条规则）
+----------------------------------
+涉及列（全部按「表头名称」定位，见下方「列定位」说明）：
+    技术对接人、评估结果/排期结论、评估开发完成时间、逾期状态、技术组测试结果、技术组说明备注
+1. 技术对接人：必须有人名，无人名 → 「@敦志勇  共x条需求，仍未设定技术对接人（第…行）；」
+2. 评估结果/排期结论：仅支持「评估通过 / 评估不通过」；未填/填错 → 异常
+   2.1 未填 且 技术对接人有值 且 (now - 提出日期 >= 24h) → 「@（技术对接人）：有x条需求，仍未反馈技术开发评估结果（第…行）；」
+   2.2 未填 且 技术对接人有值 且 (now - 提出日期 < 24h)  → 不抛异常
+   2.3 填错 且 技术对接人有值 → 「@（技术对接人）：有x条需求，请按表格格式填写（第…行）；」
+   2.4 技术对接人无值的行 → 跳过
+3. 评估开发完成时间：若 评估结果/排期结论 有值则必填，缺 → 「@（技术对接人）：有x条需求，仍未评估完成时间（第…行）；」
+4. 逾期状态：若 评估开发完成时间 有值 且 技术组测试结果 ≠ 通过，筛选 逾期状态 有值或为「是」的行
+   → 「@敦志勇 @逄浩 🔴有x条需求，已逾期（第…行）；」
+5. 技术组说明备注：若 评估结果/排期结论 = 评估不通过 → 「@（技术对接人）：有x条评审不通过的需求，请明确备注说明（第…行）；」
+- 有技术对接人 → 统一汇总，同一人只出现一次；每条同行艾特 + 行号后缀
+
+第三段：验收上线阶段（业务开发清单验收，6 条规则）
+--------------------------------------------------
+始终输出「■ 验收结果清单」统计块（总计/已通过/待验收/不通过）；
+有异常时追加「■ 异常结果」，6 条规则均同行艾特 + 行号后缀：
+1. 测试通过 且 验收结果∈{待验收,空} → 「@需求负责人：有x条开发需求，请尽快完成验收（第…行）；」
+2. 验收结果=通过 且 实际上线时间空 且 闭环完成≠是 → 「…请尽快确认上线时间、闭环（第…行）；」
+3. 验收结果=不通过 且 验收说明空 → 「…验收不通过，需要备注验收不通过原因（第…行）；」
+4. 验收结果=不通过 且 评估结果=评估通过 → 「@技术对接人：有x条开发需求验收不通过，请尽快完成优化（第…行）；」
+5. 评估结果=评估不通过 且 验收结果∉{通过,不通过} → 「…技术组反馈暂无法进行开发，请尽快确认需求方案（第…行）；」
+6. 评估结果=评估不通过 且 验收结果=不通过 → 「@逄浩 @原潮 有x条开发需求，业务和技术组均存在疑问，需领导决策（第…行）；」
+
+版式约定（重要）
+----------------
+三段标题后**不空行**，紧跟下一行内容（`一、【…】` 下一行直接是 `■ 异常结果` 或小红花）。
+段与段之间用一个空行分隔（由 render_message 统一处理）。
+
 列定位（重要）
 --------------
 本脚本不写死任何 A/B/C… 列号。启动时先读第 2 行表头，建立「表头名 → 实际列号」
@@ -22,9 +65,18 @@
 
 用法
 ----
-    python3 check_intake_fused.py --dry-run          # 只校验不推送
-    python3 check_intake_fused.py                    # 拉表 → 校验 → 推送（含当日去重）
-    python3 check_intake_fused.py --force            # 忽略当日锁，强制重发
+    # 完整流程：拉取表格 → 校验 → 推送（有异常才推）
+    python3 check_missing_fields.py
+
+    # 只校验不推送（本地调试）
+    python3 check_missing_fields.py --dry-run
+
+    # 指定表格与群机器人
+    python3 check_missing_fields.py --table-url "https://www.kdocs.cn/l/xxx" \
+                                   --webhook "https://www.yunzhijia.com/gateway/robot/webhook/send?..."
+
+    # 从已保存的 range-data JSON 离线校验
+    python3 check_missing_fields.py --from-json ./samples/range_data.json --dry-run
 
 环境变量
 --------
@@ -54,6 +106,7 @@ DEFAULT_SHEET_ID = 3           # 「项目对接清单」
 DEFAULT_SHEET_NAME = "项目对接清单"
 
 # 快速通道：已知 file_id 时可直接拉数，省掉「解析链接」「查工作表」两次往返。
+# 实测取数耗时约 2.2s → 1.1s。若直连失败会自动回退到按链接解析的完整链路。
 DEFAULT_FILE_ID = "2yRGboxQH9MLz2kbTHNErx8PtTCNR8GcJ"
 
 # ── 列定位：按「表头名称」动态取列，不再依赖固定字母/列号 ──────────
@@ -138,7 +191,7 @@ EVAL_REMIND_HOURS = 24
 # 无需求负责人的异常行：消息开头额外艾特的跟进人（2026-09-24 新增规则）
 NO_OWNER_AT = "原潮"
 
-# 三段共用的结尾提示语
+# 两段共用的结尾提示语（业务组 / 技术组统一用同一句）
 FOOTER_NOTE = "注意：请尽快完善并跟进处理各自的需求任务～"
 
 # ―― 验收上线阶段（业务开发清单验收）――
@@ -437,7 +490,7 @@ def _parse_date(text: str) -> datetime | None:
 
 
 def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
-    """逐行校验三段（业务组 / 技术组 / 验收上线），返回结构化结果。
+    """逐行校验业务组 + 技术组，返回结构化结果。
 
     cols：由 resolve_columns(cells) 得到的 {field_key: col_index} 列映射，
           全程按名称定位的列号取值。
@@ -641,36 +694,43 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
     }
 
 
+def _rows_suffix(rows: list[int]) -> str:
+    """把行号列表渲染成「（第2、4、5行）」后缀：一个「第」起头、顿号连列、末尾一个「行」。
+
+    单行 → （第2行）；多行 → （第2、4、5行）；无行号 → 空串。
+    """
+    if not rows:
+        return ""
+    return "（第" + "、".join(str(r) for r in rows) + "行）"
+
+
 def _render_collect(result: dict) -> str:
     """渲染「一、【需求收集阶段】异常通报」段落（业务组填写完整性）。
 
-    规则：
-      - 有异常 → @相应负责人 + ■ 异常结果 + ■ 异常检查规则
+    规则（2026-10-08 调整）：
+      - 不再单独一行艾特，改为「@负责人：N行需求填写不完整（第x、y行）；」同一行
+      - 有负责人 → 按负责人归并，每条带全部行号
+      - 无负责人 → 所有无负责人的行合并成一条，艾特逄浩 + 原潮
       - 无异常 → 只输出「小红花」一句（不显示异常检查规则）
     """
-    lines = ["一、【需求收集阶段】异常通报", ""]
+    lines = ["一、【需求收集阶段】异常通报"]
 
     owner_map = result["owner_map"]
     no_owner_rows = result["no_owner_rows"]
     has_any = bool(owner_map or no_owner_rows)
 
     if not has_any:
-        # 标题后已有空行，这里只补红花「后」的空行
+        # 标题紧跟小红花（保持与有异常场景「标题后直接接内容」一致）
         lines += [FLOWER_NOTE_COLLECT, ""]
         return "\n".join(lines)
 
-    at_names = list(owner_map)
-    if no_owner_rows and NO_OWNER_AT not in owner_map:
-        at_names.append(NO_OWNER_AT)
-    at_line = " ".join(f"@{name}" for name in at_names)
-    if at_line:
-        lines.append(at_line)
-
     lines.append("■ 异常结果")
     for name, rows in owner_map.items():
-        lines.append(f"{name}：{len(rows)}行需求填写不完整；")
-    for excel_row in no_owner_rows:
-        lines.append(f"第{excel_row}行：1行需求填写不完整；")
+        lines.append(f"@{name}：{len(rows)}行需求填写不完整{_rows_suffix(rows)}；")
+    # 无负责人：合并成一条，艾特 逄浩、原潮（顿号连接）
+    if no_owner_rows:
+        at_line = "、".join(f"@{n}" for n in LEADER_AT)
+        lines.append(f"{at_line}：{len(no_owner_rows)}行需求填写不完整{_rows_suffix(no_owner_rows)}；")
 
     lines += [
         "",
@@ -688,57 +748,45 @@ def _render_tech_stage(result: dict) -> str:
       - 有异常 → ■ 异常结果（逐条规则差异）
       - 无异常 → 只输出「小红花」一句
     """
-    lines = ["二、【技术评估/开发阶段】异常通报", ""]
+    lines = ["二、【技术评估/开发阶段】异常通报"]
 
     has_any = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
         result["tech_no_done"], result["tech_overdue"], result["tech_reject"],
     ])
     if not has_any:
-        # 标题后已有空行，这里只补红花「后」的空行
+        # 标题紧跟小红花（保持与有异常场景「标题后直接接内容」一致）
         lines += [FLOWER_NOTE_TECH, ""]
         return "\n".join(lines)
 
     lines.append("■ 异常结果")
 
-    # 规则1：无技术对接人 → 艾特敦志勇
+    # 规则1：无技术对接人 → 艾特敦志勇（带行号）
     if result["tech_missing_tech"]:
-        n = len(result["tech_missing_tech"])
-        lines.append(f"@{TECH_AT_NOMISS}  共{n}条需求，仍未设定技术对接人；")
+        rows = result["tech_missing_tech"]
+        lines.append(f"@{TECH_AT_NOMISS}  共{len(rows)}条需求，仍未设定技术对接人{_rows_suffix(rows)}；")
 
-    # 规则2.1：未反馈评估结果 → 按技术对接人汇总
-    if result["tech_no_eval"]:
-        at_line = " ".join(f"@{t}" for t in result["tech_no_eval"])
-        lines.append(at_line)
-        for t, rows in result["tech_no_eval"].items():
-            lines.append(f"{t}：有{len(rows)}条需求，仍未反馈技术开发评估结果；")
+    # 规则2.1：未反馈评估结果 → 「@技术对接人：有N条需求，仍未反馈技术开发评估结果（第x、y条）；」
+    for t, rows in result["tech_no_eval"].items():
+        lines.append(f"@{t}：有{len(rows)}条需求，仍未反馈技术开发评估结果{_rows_suffix(rows)}；")
 
-    # 规则2.3：评估结果填错 → 按技术对接人汇总，列出具体行号
-    if result["tech_bad_eval"]:
-        at_line = " ".join(f"@{t}" for t in result["tech_bad_eval"])
-        lines.append(at_line)
-        for t, rows in result["tech_bad_eval"].items():
-            row_desc = "、".join(f"第{r}条" for r in rows)
-            lines.append(f"{t}：{row_desc}需求，请按表格格式填写；")
+    # 规则2.3：评估结果填错 → 带行号
+    for t, rows in result["tech_bad_eval"].items():
+        lines.append(f"@{t}：有{len(rows)}条需求，请按表格格式填写{_rows_suffix(rows)}；")
 
-    # 规则3：缺评估完成时间 → 按技术对接人汇总
-    if result["tech_no_done"]:
-        at_line = " ".join(f"@{t}" for t in result["tech_no_done"])
-        lines.append(at_line)
-        for t, rows in result["tech_no_done"].items():
-            lines.append(f"{t}：有{len(rows)}条需求，仍未评估完成时间；")
+    # 规则3：缺评估完成时间 → 带行号
+    for t, rows in result["tech_no_done"].items():
+        lines.append(f"@{t}：有{len(rows)}条需求，仍未评估完成时间{_rows_suffix(rows)}；")
 
-    # 规则4：逾期 → 艾特敦志勇 + 逄浩
+    # 规则4：逾期 → 艾特敦志勇 + 逄浩（带行号）
     if result["tech_overdue"]:
+        rows = result["tech_overdue"]
         at_line = " ".join(f"@{t}" for t in TECH_AT_OVERDUE)
-        lines.append(f"{at_line} {OVERDUE_DOT}有{len(result['tech_overdue'])}条需求，已逾期；")
+        lines.append(f"{at_line} {OVERDUE_DOT}有{len(rows)}条需求，已逾期{_rows_suffix(rows)}；")
 
-    # 规则5：评审不通过 → 按技术对接人汇总
-    if result["tech_reject"]:
-        at_line = " ".join(f"@{t}" for t in result["tech_reject"])
-        lines.append(at_line)
-        for t, rows in result["tech_reject"].items():
-            lines.append(f"{t}：有{len(rows)}条评审不通过的需求，请明确备注说明；")
+    # 规则5：评审不通过 → 带行号
+    for t, rows in result["tech_reject"].items():
+        lines.append(f"@{t}：有{len(rows)}条评审不通过的需求，请明确备注说明{_rows_suffix(rows)}；")
 
     return "\n".join(lines)
 
@@ -748,10 +796,10 @@ def _render_accept_stage(result: dict) -> str:
 
     规则：
       - 始终输出「■ 验收结果清单」统计块（只要跑就输出）
-      - 有异常 → ■ 异常结果（6 条规则差异 + 以此类推）
+      - 有异常 → ■ 异常结果（6 条规则差异，每条同行艾特 + 行号）
       - 无异常 → 统计块 + 小红花
     """
-    lines = ["三、【验收上线阶段】异常通报", ""]
+    lines = ["三、【验收上线阶段】异常通报"]
 
     s = result["acc_stats"]
     lines += [
@@ -767,48 +815,37 @@ def _render_accept_stage(result: dict) -> str:
         result["acc_redo"], result["acc_undecided"], result["acc_leader"],
     ])
     if not has_any:
-        # 统计块与红花之间空一行，保持三段结构统一
+        # 统计块后空一行再给小红花
         lines += ["", FLOWER_NOTE_ACCEPT, ""]
         return "\n".join(lines)
 
     lines += ["", "■ 异常结果"]
 
-    # 规则1：测试通过但未验收 → @需求负责人
-    if result["acc_wait_accept"]:
-        lines.append(" ".join(f"@{a}" for a in result["acc_wait_accept"]))
-        for a, rows in result["acc_wait_accept"].items():
-            lines.append(f"{a}：有{len(rows)}条开发需求，请尽快完成验收；")
+    # 规则1：测试通过但未验收 → @需求负责人（带行号）
+    for a, rows in result["acc_wait_accept"].items():
+        lines.append(f"@{a}：有{len(rows)}条开发需求，请尽快完成验收{_rows_suffix(rows)}；")
 
-    # 规则2：已验收通过但未确认上线时间/闭环 → @需求负责人
-    if result["acc_confirm_online"]:
-        lines.append(" ".join(f"@{a}" for a in result["acc_confirm_online"]))
-        for a, rows in result["acc_confirm_online"].items():
-            lines.append(f"{a}：有{len(rows)}条开发需求已验收通过，请尽快确认上线时间、闭环；")
+    # 规则2：已验收通过但未确认上线时间/闭环 → @需求负责人（带行号）
+    for a, rows in result["acc_confirm_online"].items():
+        lines.append(f"@{a}：有{len(rows)}条开发需求已验收通过，请尽快确认上线时间、闭环{_rows_suffix(rows)}；")
 
-    # 规则3：验收不通过但无验收说明 → @需求负责人
-    if result["acc_no_note"]:
-        lines.append(" ".join(f"@{a}" for a in result["acc_no_note"]))
-        for a, rows in result["acc_no_note"].items():
-            lines.append(f"{a}：有{len(rows)}条开发需求，验收不通过，需要备注验收不通过原因；")
+    # 规则3：验收不通过但无验收说明 → @需求负责人（带行号）
+    for a, rows in result["acc_no_note"].items():
+        lines.append(f"@{a}：有{len(rows)}条开发需求，验收不通过，需要备注验收不通过原因{_rows_suffix(rows)}；")
 
-    # 规则4：验收不通过且技术评估通过 → @技术对接人
-    if result["acc_redo"]:
-        lines.append(" ".join(f"@{a}" for a in result["acc_redo"]))
-        for a, rows in result["acc_redo"].items():
-            lines.append(f"{a}：有{len(rows)}条开发需求验收不通过，请尽快完成优化；")
+    # 规则4：验收不通过且技术评估通过 → @技术对接人（带行号）
+    for a, rows in result["acc_redo"].items():
+        lines.append(f"@{a}：有{len(rows)}条开发需求验收不通过，请尽快完成优化{_rows_suffix(rows)}；")
 
-    # 规则5：技术评估不通过且验收未定 → @需求负责人
-    if result["acc_undecided"]:
-        lines.append(" ".join(f"@{a}" for a in result["acc_undecided"]))
-        for a, rows in result["acc_undecided"].items():
-            lines.append(f"{a}：有{len(rows)}条开发需求，技术组反馈暂无法进行开发，请尽快确认需求方案；")
+    # 规则5：技术评估不通过且验收未定 → @需求负责人（带行号）
+    for a, rows in result["acc_undecided"].items():
+        lines.append(f"@{a}：有{len(rows)}条开发需求，技术组反馈暂无法进行开发，请尽快确认需求方案{_rows_suffix(rows)}；")
 
-    # 规则6：双方均有疑问 → @逄浩 @原潮
+    # 规则6：双方均有疑问 → @逄浩 @原潮（空格连接，带行号）
     if result["acc_leader"]:
         at_line = " ".join(f"@{t}" for t in LEADER_AT)
-        lines.append(f"{at_line} 有{len(result['acc_leader'])}条开发需求，业务和技术组均存在疑问，需领导决策；")
+        lines.append(f"{at_line} 有{len(result['acc_leader'])}条开发需求，业务和技术组均存在疑问，需领导决策{_rows_suffix(result['acc_leader'])}；")
 
-    lines.append("以此类推")
     return "\n".join(lines)
 
 
@@ -828,9 +865,12 @@ def render_message(result: dict, table_url: str) -> str | None:
         （有异常→异常结果；无异常→小红花）
 
         三、【验收上线阶段】异常通报
-        （验收结果清单 + 异常结果 / 小红花）
+        （验收结果清单 + 异常结果）
 
         注意：请尽快完善并跟进处理各自的需求任务～
+
+    三段均无异常时（一、二段显示小红花，三段只有统计块），仍会推送整条消息
+    （因为三段本身承载"阶段播报"，不再返回 None）。
     """
     header = [
         "【业务需求技术对接表跟进异常提醒】",
@@ -925,7 +965,7 @@ def send_to_yzj(webhook: str, content: str, timeout: int = 30,
 # ── 主流程 ──────────────────────────────────────────────────
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="业务需求技术对接表三段式校验与异常提醒",
+        description="业务组技术对接表填写完整性校验与异常提醒",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--table-url", default=os.getenv("KDOCS_TABLE_URL", DEFAULT_TABLE_URL),
