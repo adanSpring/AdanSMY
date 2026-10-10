@@ -53,7 +53,8 @@
 
 第三段：验收上线阶段（业务开发清单验收，6 条规则）
 --------------------------------------------------
-始终输出「■ 验收结果清单」统计块（总计/已通过/待验收/不通过）；
+始终输出「■ 验收结果清单」统计块（总计/已通过/验收中/不通过）；
+（第 3 行标签为「验收中」：统计口径 = 验收结果∈{验收中,待验收,空} 的合计）
 有异常时追加「■ 异常结果」，6 条规则均同行艾特 + 行号后缀：
 1. 测试通过 且 验收结果∈{待验收,验收中,空} → 「@需求负责人：有x条开发需求，请尽快完成验收（第…行）；」
    （验收结果为空视为待验收）
@@ -805,7 +806,9 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
     chg_update_map = _group_acc(chg_update)
     chg_invalid_map = _group_acc(chg_invalid)
 
-    # 验收结果清单统计（按「业务组验收结果」列归类；空值归入"待验收"）
+    # 验收结果清单统计（按「业务组验收结果」列归类）
+    # pending 口径 = 非「通过」且非「不通过」的全部行（即 {验收中, 待验收, 空} 合计），
+    # 展示标签为「验收中」。
     acc_stats = {"total": total, "pass": 0, "pending": 0, "fail": 0}
     for row_idx in data_rows:
         row = grid.get(row_idx, {})
@@ -962,7 +965,7 @@ def _render_accept_stage(result: dict) -> str:
         "■ 验收结果清单",
         f"总计：{s['total']}条开发需求",
         f"已通过：{s['pass']}条",
-        f"待验收：{s['pending']}条",
+        f"验收中：{s['pending']}条",
         f"不通过：{s['fail']}条",
     ]
 
@@ -1278,7 +1281,7 @@ def main(argv=None) -> int:
     print(f"评审不通过：{sum(len(v) for v in result['tech_reject'].values())} 行")
     print("── 三、验收上线阶段（业务开发清单验收）──")
     s = result["acc_stats"]
-    print(f"验收结果清单：总计 {s['total']} 条，已通过 {s['pass']}，待验收 {s['pending']}，不通过 {s['fail']}")
+    print(f"验收结果清单：总计 {s['total']} 条，已通过 {s['pass']}，验收中 {s['pending']}，不通过 {s['fail']}")
     print(f"规则1 待验收：{sum(len(v) for v in result['acc_wait_accept'].values())} 行")
     print(f"规则2 待确认上线/闭环：{sum(len(v) for v in result['acc_confirm_online'].values())} 行")
     print(f"规则3 缺验收说明：{sum(len(v) for v in result['acc_no_note'].values())} 行")
