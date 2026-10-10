@@ -35,11 +35,14 @@
    2.2 未填 且 技术对接人有值 且 (now - 提出日期 < 24h)  → 不抛异常
    2.3 填错 且 技术对接人有值 → 「@（技术对接人）：有x条需求，请按表格格式填写（第…行）；」
    2.4 技术对接人无值的行 → 跳过
-3. 评估开发完成时间：若 评估结果/排期结论 有值则必填，缺 → 「@（技术对接人）：有x条需求，仍未评估完成时间（第…行）；」
-4. 逾期状态：若 评估开发完成时间 有值 且 技术组测试结果 ≠ 通过，筛选 逾期状态 有值或为「是」的行
+3. 评估开发完成时间：**仅当「评估结果/排期结论」=「评估通过」时**才必填，缺 → 「@（技术对接人）：有x条需求，仍未评估完成时间（第…行）；」
+   （评估不通过的需求本就无需排期完成时间，不再报异常）
+4. 逾期状态：若 评估开发完成时间 有值 且 技术组测试结果 ≠ 通过，
+   再筛「逾期状态」**有值且不等于「未逾期」**的行（表格实际只填「未逾期」或留空）
    → 「@敦志勇 @逄浩 🔴有x条需求，已逾期（第…行）；」
 5. 技术组说明备注：若 评估结果/排期结论 = 评估不通过 → 「@（技术对接人）：有x条评审不通过的需求，请明确备注说明（第…行）；」
 - 有技术对接人 → 统一汇总，同一人只出现一次；每条同行艾特 + 行号后缀
+- 技术对接人姓名做尾随数字归一化（「沈腾1」→「沈腾」），避免同一人被拆成两个 @对象
 
 第三段：验收上线阶段（业务开发清单验收，6 条规则）
 --------------------------------------------------
@@ -182,8 +185,16 @@ EVAL_RESULT_ALLOWED = {EVAL_RESULT_OK, EVAL_RESULT_FAIL}
 # 技术组测试结果「通过」的判定值（用于规则4：不为通过才可能逾期）
 TECH_TEST_PASS_VALUES = {"通过", "UAT通过", "测试通过"}
 
-# 逾期状态「有值/为是」的判定值
-OVERDUE_TRUE_VALUES = {"是", "有", "逾期", "true", "True", "TRUE", "Y", "是（逾期）"}
+# 逾期状态：精确排除值 —— 等于「未逾期」的行一律不算逾期
+# （表格实际只填「未逾期」或留空，不存在「是/逾期」这类真值，
+#   因此判定逻辑为：有值 且 不等于「未逾期」→ 视为逾期。
+#   绝不能再把「非空」直接当逾期，否则「未逾期」会被误报。）
+OVERDUE_EXCLUDE_VALUES = {"未逾期", "未超期", "否", "N", "no", "No", "NO"}
+
+# 技术对接人姓名归一化：剥离尾随数字（如「沈腾1」→「沈腾」），
+# 避免同一人因表格里多写了个序号而被拆成两个 @对象。
+# 只剥「末尾的纯数字」，不影响「张婉妮/刘新英」这类斜杠多人写法。
+TECH_NAME_STRIP_TAIL_DIGITS = True
 
 # 规则2.1 的时间阈值：提出日期距现在 >= 24h 才催评估结果
 EVAL_REMIND_HOURS = 24
@@ -221,6 +232,20 @@ def norm(value) -> str:
     for ch in _BLANK_CHARS:
         text = text.replace(ch, "")
     return text.strip()
+
+
+def norm_tech_name(value) -> str:
+    """技术对接人姓名归一化：在 norm() 基础上剥离尾随纯数字。
+
+    表格里同一个人常被写成「沈腾」和「沈腾1」两种，若不归一化，
+    同一个人会被拆成两个 @对象，消息里出现重复条目。
+    只剥「末尾的纯数字」，「张婉妮/刘新英」这类斜杠多人写法不受影响。
+    """
+    text = norm(value)
+    if not text or not TECH_NAME_STRIP_TAIL_DIGITS:
+        return text
+    stripped = re.sub(r"\d+$", "", text).strip()
+    return stripped or text      # 全数字的极端情况保留原值，避免变成空串
 
 
 def build_grid(cells) -> dict:
@@ -546,7 +571,7 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         excel_row = row_idx + 1        # 0-based → Excel 真实行号
 
         owner = norm(row.get(c_owner, ""))
-        tech = norm(row.get(c_tech, ""))
+        tech = norm_tech_name(row.get(c_tech, ""))      # 尾随数字归一化（沈腾1→沈腾）
         eval_result = norm(row.get(c_eval_result, ""))
         eval_done = norm(row.get(c_eval_done, ""))
         overdue_val = norm(row.get(c_overdue, ""))
@@ -585,13 +610,15 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
                 # 规则2.3：填错
                 tech_bad_eval.append((excel_row, tech))
             else:
-                # 规则3：已评估（评估通过 / 评估不通过）→ 评估完成时间必填
-                if not eval_done:
+                # 规则3：**仅当「评估结果 = 评估通过」时**才要求填评估完成时间。
+                # 「评估不通过」的需求本就无需排期完成时间，不再因此报异常。
+                if eval_result == EVAL_RESULT_OK and not eval_done:
                     tech_no_done.append((excel_row, tech))
 
-            # 规则4：有评估完成时间 且 技术组测试结果不为通过 → 看逾期状态
+            # 规则4：有评估完成时间 且 技术组测试结果不为通过 → 再看逾期状态
+            # 判定：逾期状态「有值」且「不等于未逾期」才算逾期。
             if eval_done and tech_test not in TECH_TEST_PASS_VALUES:
-                if overdue_val and (overdue_val in OVERDUE_TRUE_VALUES or len(overdue_val) > 0):
+                if overdue_val and overdue_val not in OVERDUE_EXCLUDE_VALUES:
                     tech_overdue.append(excel_row)
 
             # 规则5：评估结果 = 评估不通过 → 异常
