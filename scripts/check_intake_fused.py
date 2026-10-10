@@ -17,7 +17,7 @@
 「各项开发项进度无异常，奖励每人一朵小红花🌹」+ 空行，**不再展开三段**。
 
 （2026-10-10 新增第四段【变更与合规】，均基于与上一版本快照的比对；
-「简化版」的触发条件相应升级为**四段全无异常**。）
+第四段**仅在有异常时显示**；「简化版」的触发条件为**四段全无异常**。）
 
 第一段：业务组填写完整性
 ------------------------
@@ -73,7 +73,7 @@
 2. 【不合规操作通报】评估开发完成时间较上一版本变化，且 更新列内容 为空或不含「YC已更新」
    → 「@（技术对接人，无则原潮）：需求（第…行）请勿直接修改开发完成时间！」
    · 豁免：上一版本评估开发完成时间为空、当前有值（视为正常补填），不算异常。
-- 无异常 → 该段只显示小红花一句：「变更与合规检查无异常，奖励一朵小红花🌹」
+- **本段无异常 → 整段不显示**（不输出标题、不输出小红花）；只有存在异常时才出现。
 
 版式约定（重要）
 ----------------
@@ -254,11 +254,11 @@ UPDATE_CHANGE_MSG = "申请变更列内容，请尽快更新！"
 YC_UPDATED_TOKEN = "YC已更新"    # 更新列内容中的合规标记（含此串即视为已走变更流程）
 INVALID_MODIFY_MSG = "请勿直接修改开发完成时间！"
 
-# 无异常时展示的「小红花」文案（三段各一句）
+# 无异常时展示的「小红花」文案（前三段各一句）
+# 注意：第四段（变更与合规）无异常时整段不显示，故无需小红花文案。
 FLOWER_NOTE_COLLECT = "业务组表现优异，今日无异常，奖励一朵小红花🌹"
 FLOWER_NOTE_TECH = "技术组表现优异，今日无异常，奖励一朵小红花🌹"
 FLOWER_NOTE_ACCEPT = "各项开发项进度无异常，奖励每人一朵小红花🌹"
-FLOWER_NOTE_CHANGE = "变更与合规检查无异常，奖励一朵小红花🌹"
 
 
 # ── 工具函数 ────────────────────────────────────────────────
@@ -1012,19 +1012,18 @@ def _render_change_stage(result: dict) -> str:
       - 更新列内容较上一版本有变化 → 「@原潮：需求（第…行）申请变更列内容，请尽快更新！」
       - 评估开发完成时间较上一版本变化，且 更新列内容 为空/不含「YC已更新」
         → 「@（技术对接人，无则原潮）：需求（第…行）请勿直接修改开发完成时间！」
-      - 无异常 → 只输出「小红花」一句
+      - **无异常 → 整段不显示**（返回空串，不输出标题也不输出小红花）——
+        与一/二/三段不同：第四段只在有异常时才出现。
     """
-    lines = ["四、【变更与合规】通报"]
-
     chg_update = result.get("chg_update") or {}
     chg_invalid = result.get("chg_invalid") or {}
     has_any = bool(chg_update or chg_invalid)
 
     if not has_any:
-        lines += [FLOWER_NOTE_CHANGE, ""]
-        return "\n".join(lines)
+        # 第四段无异常 → 整段省略（不输出标题、不输出小红花）
+        return ""
 
-    lines.append("■ 异常结果")
+    lines = ["四、【变更与合规】通报", "■ 异常结果"]
 
     # 规则D1：更新列内容有变化 → @原潮（带行号）
     for a, rows in chg_update.items():
@@ -1038,10 +1037,38 @@ def _render_change_stage(result: dict) -> str:
 
 
 def render_message(result: dict, table_url: str) -> str | None:
-    """按约定模板渲染群消息文本（四段式）。
+    """按约定模板渲染群消息文本（三段式）。
 
-    有异常时逐段展开（一/二/三/四），段间空一行，统一以结尾语收尾；
-    四段全无异常时走「简化版」：仅表头 + 一句小红花 + 空行结尾。
+    模板结构（有异常时，三段明细）：
+        【业务需求技术对接表跟进异常提醒】
+        在线表格：…
+        对接清单：共 N 条需求
+        检查时间：…
+
+        一、【需求收集阶段】异常通报
+        （有异常→@+异常结果+检查规则；无异常→小红花）
+
+        二、【技术评估/开发阶段】异常通报
+        （有异常→异常结果；无异常→小红花）
+
+        三、【验收上线阶段】异常通报
+        （验收结果清单 + 异常结果）
+
+        注意：请尽快完善并跟进处理各自的需求任务～
+
+    三段全无异常时（简化版，不再展开三段）：
+        【业务需求技术对接表跟进异常提醒】
+        在线表格：…
+        对接清单：共 N 条需求
+        检查时间：…
+
+        各项开发项进度无异常，奖励每人一朵小红花🌹
+        （空行结尾，不输出三段与小标题）
+
+    第四段（变更与合规）的显示规则（与其他段不同）：
+        **只有存在异常时才显示**；无异常则整段省略（不输出标题、也不输出小红花）。
+        即：一/二/三段无异常时显示各自小红花；第四段无异常时直接不出现。
+        若四段全无异常，则整条消息走「简化版」（见上）。
     """
     header = "\n".join([
         "【业务需求技术对接表跟进异常提醒】",
@@ -1050,7 +1077,7 @@ def render_message(result: dict, table_url: str) -> str | None:
         f"检查时间：{result['check_time']}",
     ])
 
-    # 判定四段是否全无异常
+    # 判定三段是否全无异常
     has_collect = bool(result["owner_map"] or result["no_owner_rows"])
     has_tech = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
@@ -1071,13 +1098,18 @@ def render_message(result: dict, table_url: str) -> str | None:
     seg1 = _render_collect(result)
     seg2 = _render_tech_stage(result)
     seg3 = _render_accept_stage(result)
-    seg4 = _render_change_stage(result)
+    seg4 = _render_change_stage(result)   # 无异常时返回空串
 
     def _trim(seg: str) -> str:
         # 去掉段首尾多余空行，避免与段间分隔叠加成多个空行
         return seg.strip("\n")
 
-    parts = [header, _trim(seg1), _trim(seg2), _trim(seg3), _trim(seg4), FOOTER_NOTE]
+    # 第四段只在有异常时出现：无异常（空串）则不参与拼接，
+    # 避免多出一个空行/分隔符，也保证四段全清时不会出现空标题。
+    parts = [header, _trim(seg1), _trim(seg2), _trim(seg3)]
+    if _trim(seg4):
+        parts.append(_trim(seg4))
+    parts.append(FOOTER_NOTE)
     return "\n\n".join(parts)
 
 
