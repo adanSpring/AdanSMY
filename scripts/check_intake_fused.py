@@ -50,12 +50,14 @@
 --------------------------------------------------
 始终输出「■ 验收结果清单」统计块（总计/已通过/待验收/不通过）；
 有异常时追加「■ 异常结果」，6 条规则均同行艾特 + 行号后缀：
-1. 测试通过 且 验收结果∈{待验收,空} → 「@需求负责人：有x条开发需求，请尽快完成验收（第…行）；」
+1. 测试通过 且 验收结果∈{待验收,验收中,空} → 「@需求负责人：有x条开发需求，请尽快完成验收（第…行）；」
+   （验收结果为空视为待验收）
 2. 验收结果=通过 且 实际上线时间空 且 闭环完成≠是 → 「…请尽快确认上线时间、闭环（第…行）；」
 3. 验收结果=不通过 且 验收说明空 → 「…验收不通过，需要备注验收不通过原因（第…行）；」
 4. 验收结果=不通过 且 评估结果=评估通过 → 「@技术对接人：有x条开发需求验收不通过，请尽快完成优化（第…行）；」
 5. 评估结果=评估不通过 且 验收结果∉{通过,不通过} → 「…技术组反馈暂无法进行开发，请尽快确认需求方案（第…行）；」
-6. 评估结果=评估不通过 且 验收结果=不通过 → 「@逄浩 @原潮 有x条开发需求，业务和技术组均存在疑问，需领导决策（第…行）；」
+6. 评估结果=评估不通过 且 验收结果=不通过 → 「@逄浩、@原潮 有x条开发需求，业务和技术组均存在疑问，需领导决策（第…行）；」
+兜底：若异常明细行的需求负责人 / 技术对接人为空，则艾特原潮（NO_OWNER_AT）。
 
 版式约定（重要）
 ----------------
@@ -211,7 +213,8 @@ FOOTER_NOTE = "注意：请尽快完善并跟进处理各自的需求任务～"
 # 业务组验收结果 允许的取值
 ACCEPT_PASS = "通过"
 ACCEPT_FAIL = "不通过"
-ACCEPT_PENDING_VALUES = {"待验收", "", "待验收中", "待验证"}   # 空值视为待验收
+# 规则1 触发条件：验收结果 ∈ {待验收, 验收中} 或为空（空值视为待验收）
+ACCEPT_PENDING_VALUES = {"待验收", "验收中", "待验收中", "待验证", ""}
 
 # 闭环完成「是」的判定值
 CLOSED_TRUE_VALUES = {"是", "已完成", "闭环", "true", "True", "TRUE", "Y"}
@@ -642,7 +645,7 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         is_accept_pending = (accept_result in ACCEPT_PENDING_VALUES or accept_result == "")
         is_closed = (closed_loop in CLOSED_TRUE_VALUES)
 
-        # 规则1：技术组测试结果=通过 且 验收结果∈{待验收,空} → @需求负责人
+        # 规则1：技术组测试结果=通过 且 验收结果∈{待验收,验收中,空} → @需求负责人
         if is_test_pass and is_accept_pending:
             acc_wait_accept.append((excel_row, owner or NO_OWNER_AT, owner))
         # 规则2：验收结果=通过 且 实际上线时间空 且 闭环完成≠是 → @需求负责人
@@ -657,7 +660,7 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         # 规则5：评估结果=评估不通过 且 验收结果∉{通过,不通过} → @需求负责人
         if is_eval_fail and not is_accept_pass and not is_accept_fail:
             acc_undecided.append((excel_row, owner or NO_OWNER_AT, owner))
-        # 规则6：评估结果=评估不通过 且 验收结果=不通过 → @逄浩 @原潮
+        # 规则6：评估结果=评估不通过 且 验收结果=不通过 → @逄浩、@原潮
         if is_eval_fail and is_accept_fail:
             acc_leader.append(excel_row)
 
@@ -871,9 +874,9 @@ def _render_accept_stage(result: dict) -> str:
     for a, rows in result["acc_undecided"].items():
         lines.append(f"@{a}：有{len(rows)}条开发需求，技术组反馈暂无法进行开发，请尽快确认需求方案{_rows_suffix(rows)}；")
 
-    # 规则6：双方均有疑问 → @逄浩 @原潮（空格连接，带行号）
+    # 规则6：双方均有疑问 → @逄浩、@原潮（顿号连接，带行号）
     if result["acc_leader"]:
-        at_line = " ".join(f"@{t}" for t in LEADER_AT)
+        at_line = "、".join(f"@{t}" for t in LEADER_AT)
         lines.append(f"{at_line} 有{len(result['acc_leader'])}条开发需求，业务和技术组均存在疑问，需领导决策{_rows_suffix(result['acc_leader'])}；")
 
     return "\n".join(lines)
