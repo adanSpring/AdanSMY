@@ -40,7 +40,9 @@
 4. 逾期状态：若 评估开发完成时间 有值 且 技术组测试结果 ≠ 通过，
    再筛「逾期状态」**有值且不等于「未逾期」**的行（表格实际只填「未逾期」或留空）
    → 「@敦志勇 @逄浩 🔴有x条需求，已逾期（第…行）；」
-5. 技术组说明备注：若 评估结果/排期结论 = 评估不通过 → 「@（技术对接人）：有x条评审不通过的需求，请明确备注说明（第…行）；」
+5. 技术组说明备注：若 评估结果/排期结论 = 评估不通过 **且 技术组说明备注为空**
+   → 「@（技术对接人）：有x条评审不通过的需求，请明确备注说明（第…行）；」
+   （已填备注说明的需求不再催办）
 - 有技术对接人 → 统一汇总，同一人只出现一次；每条同行艾特 + 行号后缀
 - 技术对接人姓名做尾随数字归一化（「沈腾1」→「沈腾」），避免同一人被拆成两个 @对象
 
@@ -621,8 +623,9 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
                 if overdue_val and overdue_val not in OVERDUE_EXCLUDE_VALUES:
                     tech_overdue.append(excel_row)
 
-            # 规则5：评估结果 = 评估不通过 → 异常
-            if eval_result == EVAL_RESULT_FAIL:
+            # 规则5：评估结果 = 评估不通过 **且「技术组说明备注」为空** → 异常
+            # （填了备注说明的不再催办，避免已说明原因的需求被反复提醒）
+            if eval_result == EVAL_RESULT_FAIL and tech_note == "":
                 tech_reject.append((excel_row, tech, tech_note))
 
         # ── 模块 C：验收上线阶段（业务开发清单验收）──
