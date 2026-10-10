@@ -12,7 +12,8 @@
   二、【技术评估/开发阶段】异常通报 ← 技术组 5 条规则
   三、【验收上线阶段】异常通报   ← 业务开发清单验收 6 条规则 + 验收结果清单统计
 
-三段均无异常时，一、二段显示「小红花」，三段输出统计块 + 「小红花」，整条消息仍会推送。
+三段均无异常时，整条消息**简化为**：表头（标题/链接/条数/时间）+ 空行 + 一句
+「各项开发项进度无异常，奖励每人一朵小红花🌹」+ 空行，**不再展开三段**。
 
 第一段：业务组填写完整性
 ------------------------
@@ -63,6 +64,7 @@
 ----------------
 三段标题后**不空行**，紧跟下一行内容（`一、【…】` 下一行直接是 `■ 异常结果` 或小红花）。
 段与段之间用一个空行分隔（由 render_message 统一处理）。
+三段全无异常时走**简化版**（仅表头 + 一句小红花 + 空行结尾，不展开三段）。
 
 列定位（重要）
 --------------
@@ -885,7 +887,7 @@ def _render_accept_stage(result: dict) -> str:
 def render_message(result: dict, table_url: str) -> str | None:
     """按约定模板渲染群消息文本（三段式）。
 
-    模板结构：
+    模板结构（有异常时，三段明细）：
         【业务需求技术对接表跟进异常提醒】
         在线表格：…
         对接清单：共 N 条需求
@@ -902,15 +904,37 @@ def render_message(result: dict, table_url: str) -> str | None:
 
         注意：请尽快完善并跟进处理各自的需求任务～
 
-    三段均无异常时（一、二段显示小红花，三段只有统计块），仍会推送整条消息
-    （因为三段本身承载"阶段播报"，不再返回 None）。
+    三段全无异常时（简化版，不再展开三段）：
+        【业务需求技术对接表跟进异常提醒】
+        在线表格：…
+        对接清单：共 N 条需求
+        检查时间：…
+
+        各项开发项进度无异常，奖励每人一朵小红花🌹
+        （空行结尾，不输出三段与小标题）
     """
-    header = [
+    header = "\n".join([
         "【业务需求技术对接表跟进异常提醒】",
         f"在线表格：{table_url}",
         f"对接清单：共 {result['total']} 条需求",
         f"检查时间：{result['check_time']}",
-    ]
+    ])
+
+    # 判定三段是否全无异常
+    has_collect = bool(result["owner_map"] or result["no_owner_rows"])
+    has_tech = any([
+        result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
+        result["tech_no_done"], result["tech_overdue"], result["tech_reject"],
+    ])
+    has_acc = any([
+        result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
+        result["acc_redo"], result["acc_undecided"], result["acc_leader"],
+    ])
+
+    # 三段全无异常 → 简化版：仅表头 + 小红花一句 + 空行结尾
+    if not (has_collect or has_tech or has_acc):
+        return header + "\n\n" + FLOWER_NOTE_ACCEPT + "\n"
+
     seg1 = _render_collect(result)
     seg2 = _render_tech_stage(result)
     seg3 = _render_accept_stage(result)
@@ -919,7 +943,7 @@ def render_message(result: dict, table_url: str) -> str | None:
         # 去掉段首尾多余空行，避免与段间分隔叠加成多个空行
         return seg.strip("\n")
 
-    parts = ["\n".join(header), _trim(seg1), _trim(seg2), _trim(seg3), FOOTER_NOTE]
+    parts = [header, _trim(seg1), _trim(seg2), _trim(seg3), FOOTER_NOTE]
     return "\n\n".join(parts)
 
 
@@ -1088,7 +1112,7 @@ def main(argv=None) -> int:
     print(f"规则5 待确认需求方案：{sum(len(v) for v in result['acc_undecided'].values())} 行")
     print(f"规则6 需领导决策：{len(result['acc_leader'])} 行")
 
-    # 3) 渲染（三段式；三段均无异常时仍推送，一、二段显示小红花）
+    # 3) 渲染（三段式；三段全无异常时走简化版：仅表头 + 小红花）
     message = render_message(result, args.table_url)
 
     print("\n" + "=" * 60)
@@ -1099,7 +1123,7 @@ def main(argv=None) -> int:
             ("一、需求收集阶段异常", has_biz_issue),
             ("二、技术评估/开发阶段异常", has_tech_issue),
             ("三、验收上线阶段异常", has_acc_issue),
-        ) if ok] or ["三段均无异常（展示小红花）"]
+        ) if ok] or ["三段均无异常（简化版：仅表头 + 小红花）"]
     ))
 
     # 4) 推送（含「当日只推一次」去重保护）
