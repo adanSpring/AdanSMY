@@ -11,9 +11,13 @@
   一、【需求收集阶段】异常通报   ← 业务组填写完整性
   二、【技术评估/开发阶段】异常通报 ← 技术组 5 条规则
   三、【验收上线阶段】异常通报   ← 业务开发清单验收 6 条规则 + 验收结果清单统计
+  四、【变更与合规】通报         ← 变更列内容提醒 + 不合规操作通报（基于版本快照比对）
 
 三段均无异常时，整条消息**简化为**：表头（标题/链接/条数/时间）+ 空行 + 一句
 「各项开发项进度无异常，奖励每人一朵小红花🌹」+ 空行，**不再展开三段**。
+
+（2026-10-10 新增第四段【变更与合规】，均基于与上一版本快照的比对；
+「简化版」的触发条件相应升级为**四段全无异常**。）
 
 第一段：业务组填写完整性
 ------------------------
@@ -60,11 +64,21 @@
 6. 评估结果=评估不通过 且 验收结果=不通过 → 「@逄浩、@原潮 有x条开发需求，业务和技术组均存在疑问，需领导决策（第…行）；」
 兜底：若异常明细行的需求负责人 / 技术对接人为空，则艾特原潮（NO_OWNER_AT）。
 
+第四段：变更与合规（第四段，2 条规则；均需「上一版本快照」比对）
+----------------------------------------------------------------
+基准：与去重锁同目录的 `version-snapshot.json`（「知识库」），保存上一版本每行的
+「更新列内容」与「评估开发完成时间」；每轮比对后立即回写为最新版本。
+首次运行无快照 → 第四段整体跳过（避免误报）；「更新列内容」列缺失 → 同样跳过。
+1. 【更新列内容提醒】更新列内容较上一版本有变化 → 「@原潮：需求（第…行）申请变更列内容，请尽快更新！」
+2. 【不合规操作通报】评估开发完成时间较上一版本变化，且 更新列内容 为空或不含「YC已更新」
+   → 「@（技术对接人，无则原潮）：需求（第…行）请勿直接修改开发完成时间！」
+   · 豁免：上一版本评估开发完成时间为空、当前有值（视为正常补填），不算异常。
+- 无异常 → 该段只显示小红花一句：「变更与合规检查无异常，奖励一朵小红花🌹」
+
 版式约定（重要）
 ----------------
 三段标题后**不空行**，紧跟下一行内容（`一、【…】` 下一行直接是 `■ 异常结果` 或小红花）。
 段与段之间用一个空行分隔（由 render_message 统一处理）。
-三段全无异常时走**简化版**（仅表头 + 一句小红花 + 空行结尾，不展开三段）。
 
 列定位（重要）
 --------------
@@ -150,10 +164,16 @@ FIELD_HEADERS = {
     "online_time":   "实际上线时间",
     "online_effect": "实际上线效果",
     "closed_loop":   "闭环完成",
+    # ―― 变更与合规（第四段）――
+    "update_col":    "更新列内容",
 }
 
 # 模块A 必填项（内部键）
 REQUIRED_FIELD_KEYS = ["system", "module", "branch", "proposer", "owner", "priority", "date"]
+
+# 允许缺失的列（缺失时跳过对应校验，不触发 exit 4）：
+# 「更新列内容」是第四段（变更与合规）专用列，若被改名/删除只跳过第四段。
+OPTIONAL_FIELD_KEYS = {"update_col"}
 
 # 模块A 至少填一项（内部键）
 ANY_OF_KEYS = ["bg", "desc"]
@@ -224,10 +244,21 @@ CLOSED_TRUE_VALUES = {"是", "已完成", "闭环", "true", "True", "TRUE", "Y"}
 # 规则6 艾特：业务与技术组均有疑问，需领导决策
 LEADER_AT = ["逄浩", "原潮"]
 
+# ―― 第四段【变更与合规】――
+# 变更列内容提醒：更新列内容较上一版本有变化 → 艾特原潮，提醒尽快更新
+UPDATE_CHANGE_AT = "原潮"
+UPDATE_CHANGE_MSG = "申请变更列内容，请尽快更新！"
+
+# 不合规操作通报：评估开发完成时间较上一版本变化，且更新列内容 为空/不含 YC已更新 → 异常
+# （上一版本评估完成时间为空、当前有值 → 视为正常补填，不算异常）
+YC_UPDATED_TOKEN = "YC已更新"    # 更新列内容中的合规标记（含此串即视为已走变更流程）
+INVALID_MODIFY_MSG = "请勿直接修改开发完成时间！"
+
 # 无异常时展示的「小红花」文案（三段各一句）
 FLOWER_NOTE_COLLECT = "业务组表现优异，今日无异常，奖励一朵小红花🌹"
 FLOWER_NOTE_TECH = "技术组表现优异，今日无异常，奖励一朵小红花🌹"
 FLOWER_NOTE_ACCEPT = "各项开发项进度无异常，奖励每人一朵小红花🌹"
+FLOWER_NOTE_CHANGE = "变更与合规检查无异常，奖励一朵小红花🌹"
 
 
 # ── 工具函数 ────────────────────────────────────────────────
@@ -304,6 +335,10 @@ def resolve_columns(cells) -> dict:
     for key, header in FIELD_HEADERS.items():
         col = name_to_col.get(header)
         if col is None:
+            # 「更新列内容」为第四段（变更与合规）专用列：缺失时不硬失败，
+            # 仅跳过第四段校验（见 check_rows 中 update_col 缺省处理）。
+            if key in OPTIONAL_FIELD_KEYS:
+                continue
             missing.append(header)
         else:
             mapping[key] = col
@@ -429,6 +464,42 @@ def mark_sent_today(today: str, at: str, msg_id: str = "",
     os.replace(tmp, lock_file)   # 原子写入，避免并发读到半截文件
 
 
+# ── 版本快照（第四段【变更与合规】的比对基准）──────────────────
+# 「知识库」= 与去重锁同目录的 schema 快照文件：保存「上一版本」每行的
+# 「更新列内容」与「评估开发完成时间」。每轮比对完立即回写为最新版本，
+# 使下一次运行以「本次」为基准，从而稳定识别「较上一次核验的版本」的变化。
+SNAPSHOT_FILE = os.path.join(LOCK_DIR, "version-snapshot.json")
+
+
+def load_snapshot(snapshot_file: str = SNAPSHOT_FILE) -> dict | None:
+    """读取上一版本快照。返回 {行号(str): {"update_col":…, "eval_done":…}}；不存在返回 None。"""
+    if not os.path.exists(snapshot_file):
+        return None
+    try:
+        with open(snapshot_file, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    rows = data.get("rows") if isinstance(data, dict) else None
+    return rows if isinstance(rows, dict) else None
+
+
+def save_snapshot(rows: dict, snapshot_file: str = SNAPSHOT_FILE) -> None:
+    """把本轮快照回写为最新版本（原子写入）。"""
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(snapshot_file) or ".", exist_ok=True)
+    payload = {
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "col": FIELD_HEADERS["update_col"],
+        "rows": rows,
+    }
+    tmp = snapshot_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, snapshot_file)
+
+
 def resolve_file_id(table_url: str, explicit_file_id: str | None = None) -> str:
     """从在线表格链接解析 file_id。"""
     if explicit_file_id:
@@ -521,11 +592,14 @@ def _parse_date(text: str) -> datetime | None:
     return None
 
 
-def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
-    """逐行校验业务组 + 技术组，返回结构化结果。
+def check_rows(cells, cols: dict, now: datetime | None = None,
+               prev_snapshot: dict | None = None) -> dict:
+    """逐行校验业务组 + 技术组 + 验收上线 + 变更与合规，返回结构化结果。
 
     cols：由 resolve_columns(cells) 得到的 {field_key: col_index} 列映射，
           全程按名称定位的列号取值。
+    prev_snapshot：上一版本快照 {excel_row: {"update_col":…, "eval_done":…}}，
+          用于第四段【变更与合规】的版本对比；为 None 时跳过第四段（首次运行）。
     """
     now = now or datetime.now()
     grid = build_grid(cells)
@@ -546,6 +620,8 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
     c_accept_note = cols["accept_note"]
     c_online_time = cols["online_time"]
     c_closed_loop = cols["closed_loop"]
+    # ―― 第四段：变更与合规（更新列内容为可选列）――
+    c_update_col = cols.get("update_col")
 
     total = 0
     abnormal = []          # 业务组：[(excel_row, owner, missing_fields)]
@@ -565,6 +641,15 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
     acc_redo = []                   # 规则4：验收不通过且技术评估通过 → [(row, at, tech)]
     acc_undecided = []              # 规则5：技术评估不通过且验收未定 → [(row, at, owner)]
     acc_leader = []                 # 规则6：双方均疑问 → [(row, "逄浩/原潮", "")]
+    # ―― 第四段【变更与合规】异常累积容器 ――
+    chg_update = []                 # 更新列内容有变化 → [(excel_row, at, "")]，艾特原潮
+    chg_invalid = []                # 评估完成时间被违规修改 → [(excel_row, at, tech)]，艾特技术对接人
+    # 第四段版本对比只能在「有上一版本快照」时进行；无快照则整体跳过（首次运行）
+    prev = prev_snapshot if isinstance(prev_snapshot, dict) else None
+    compare_enabled = bool(prev) and c_update_col is not None
+
+    # 本轮快照：每行 {update_col, eval_done}，供下一轮比对
+    cur_snapshot: dict[str, dict[str, str]] = {}
 
     for row_idx in data_rows:
         row = grid.get(row_idx, {})
@@ -647,7 +732,7 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         is_accept_pending = (accept_result in ACCEPT_PENDING_VALUES or accept_result == "")
         is_closed = (closed_loop in CLOSED_TRUE_VALUES)
 
-        # 规则1：技术组测试结果=通过 且 验收结果∈{待验收,验收中,空} → @需求负责人
+        # 规则1：技术组测试结果=通过 且 验收结果∈{待验收,空} → @需求负责人
         if is_test_pass and is_accept_pending:
             acc_wait_accept.append((excel_row, owner or NO_OWNER_AT, owner))
         # 规则2：验收结果=通过 且 实际上线时间空 且 闭环完成≠是 → @需求负责人
@@ -662,9 +747,36 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         # 规则5：评估结果=评估不通过 且 验收结果∉{通过,不通过} → @需求负责人
         if is_eval_fail and not is_accept_pass and not is_accept_fail:
             acc_undecided.append((excel_row, owner or NO_OWNER_AT, owner))
-        # 规则6：评估结果=评估不通过 且 验收结果=不通过 → @逄浩、@原潮
+        # 规则6：评估结果=评估不通过 且 验收结果=不通过 → @逄浩 @原潮
         if is_eval_fail and is_accept_fail:
             acc_leader.append(excel_row)
+
+        # ── 模块 D：变更与合规（第四段，均需与上一版本快照比对）──
+        if compare_enabled:
+            update_col = norm(row.get(c_update_col, ""))
+            prev_row = prev.get(str(excel_row)) or prev.get(excel_row) or {}
+            prev_update = norm(prev_row.get("update_col", ""))
+            prev_done = norm(prev_row.get("eval_done", ""))
+
+            # 规则D1【更新列内容提醒】：更新列内容较上一版本有变化 → @原潮
+            if update_col != prev_update:
+                chg_update.append((excel_row, UPDATE_CHANGE_AT, ""))
+
+            # 规则D2【不合规操作通报】：评估完成时间被改，且未走变更流程 → @技术对接人
+            #   - 变化：当前 ≠ 上一版本
+            #   - 豁免：上一版本为空（视为正常补填）
+            #   - 合规：更新列内容含「YC已更新」
+            #   -（本段@人：技术对接人，无则原潮兜底）
+            if eval_done != prev_done and prev_done != "" \
+                    and YC_UPDATED_TOKEN not in update_col:
+                chg_invalid.append((excel_row, tech or NO_OWNER_AT, tech))
+
+        # 记录本轮快照（无论是否可比对，都持续更新为最新版本）
+        if c_update_col is not None:
+            cur_snapshot[str(excel_row)] = {
+                "update_col": norm(row.get(c_update_col, "")),
+                "eval_done": norm(row.get(c_eval_done, "")),
+            }
 
     # 汇总：有负责人 → 按负责人归并；无负责人 → 按行号单独列出
     owner_map: dict[str, list[int]] = {}
@@ -688,6 +800,10 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         for excel_row, at, _ in pairs:
             m.setdefault(at, []).append(excel_row)
         return m
+
+    # 第四段汇总：按 @对象 归并（同一人只出现一次）
+    chg_update_map = _group_acc(chg_update)
+    chg_invalid_map = _group_acc(chg_invalid)
 
     # 验收结果清单统计（按「业务组验收结果」列归类；空值归入"待验收"）
     acc_stats = {"total": total, "pass": 0, "pending": 0, "fail": 0}
@@ -726,6 +842,11 @@ def check_rows(cells, cols: dict, now: datetime | None = None) -> dict:
         "acc_redo": _group_acc(acc_redo),
         "acc_undecided": _group_acc(acc_undecided),
         "acc_leader": sorted(acc_leader),
+        # 变更与合规（第四段）
+        "chg_update": chg_update_map,      # {原潮: [行号]}
+        "chg_invalid": chg_invalid_map,    # {技术对接人: [行号]}
+        "chg_compare_enabled": compare_enabled,
+        "cur_snapshot": cur_snapshot,      # 本轮最新快照，供回写
     }
 
 
@@ -884,34 +1005,43 @@ def _render_accept_stage(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_change_stage(result: dict) -> str:
+    """渲染「四、【变更与合规】通报」段落（第四段）。
+
+    规则（均基于与上一版本的快照比对）：
+      - 更新列内容较上一版本有变化 → 「@原潮：需求（第…行）申请变更列内容，请尽快更新！」
+      - 评估开发完成时间较上一版本变化，且 更新列内容 为空/不含「YC已更新」
+        → 「@（技术对接人，无则原潮）：需求（第…行）请勿直接修改开发完成时间！」
+      - 无异常 → 只输出「小红花」一句
+    """
+    lines = ["四、【变更与合规】通报"]
+
+    chg_update = result.get("chg_update") or {}
+    chg_invalid = result.get("chg_invalid") or {}
+    has_any = bool(chg_update or chg_invalid)
+
+    if not has_any:
+        lines += [FLOWER_NOTE_CHANGE, ""]
+        return "\n".join(lines)
+
+    lines.append("■ 异常结果")
+
+    # 规则D1：更新列内容有变化 → @原潮（带行号）
+    for a, rows in chg_update.items():
+        lines.append(f"@{a}：需求{_rows_suffix(rows)}{UPDATE_CHANGE_MSG}")
+
+    # 规则D2：违规修改评估完成时间 → @技术对接人（带行号）
+    for a, rows in chg_invalid.items():
+        lines.append(f"@{a}：需求{_rows_suffix(rows)}{INVALID_MODIFY_MSG}")
+
+    return "\n".join(lines)
+
+
 def render_message(result: dict, table_url: str) -> str | None:
-    """按约定模板渲染群消息文本（三段式）。
+    """按约定模板渲染群消息文本（四段式）。
 
-    模板结构（有异常时，三段明细）：
-        【业务需求技术对接表跟进异常提醒】
-        在线表格：…
-        对接清单：共 N 条需求
-        检查时间：…
-
-        一、【需求收集阶段】异常通报
-        （有异常→@+异常结果+检查规则；无异常→小红花）
-
-        二、【技术评估/开发阶段】异常通报
-        （有异常→异常结果；无异常→小红花）
-
-        三、【验收上线阶段】异常通报
-        （验收结果清单 + 异常结果）
-
-        注意：请尽快完善并跟进处理各自的需求任务～
-
-    三段全无异常时（简化版，不再展开三段）：
-        【业务需求技术对接表跟进异常提醒】
-        在线表格：…
-        对接清单：共 N 条需求
-        检查时间：…
-
-        各项开发项进度无异常，奖励每人一朵小红花🌹
-        （空行结尾，不输出三段与小标题）
+    有异常时逐段展开（一/二/三/四），段间空一行，统一以结尾语收尾；
+    四段全无异常时走「简化版」：仅表头 + 一句小红花 + 空行结尾。
     """
     header = "\n".join([
         "【业务需求技术对接表跟进异常提醒】",
@@ -920,7 +1050,7 @@ def render_message(result: dict, table_url: str) -> str | None:
         f"检查时间：{result['check_time']}",
     ])
 
-    # 判定三段是否全无异常
+    # 判定四段是否全无异常
     has_collect = bool(result["owner_map"] or result["no_owner_rows"])
     has_tech = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
@@ -930,20 +1060,24 @@ def render_message(result: dict, table_url: str) -> str | None:
         result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
         result["acc_redo"], result["acc_undecided"], result["acc_leader"],
     ])
+    has_chg = any([
+        result.get("chg_update"), result.get("chg_invalid"),
+    ])
 
-    # 三段全无异常 → 简化版：仅表头 + 小红花一句 + 空行结尾
-    if not (has_collect or has_tech or has_acc):
+    # 四段全无异常 → 简化版：仅表头 + 小红花一句 + 空行结尾
+    if not (has_collect or has_tech or has_acc or has_chg):
         return header + "\n\n" + FLOWER_NOTE_ACCEPT + "\n"
 
     seg1 = _render_collect(result)
     seg2 = _render_tech_stage(result)
     seg3 = _render_accept_stage(result)
+    seg4 = _render_change_stage(result)
 
     def _trim(seg: str) -> str:
         # 去掉段首尾多余空行，避免与段间分隔叠加成多个空行
         return seg.strip("\n")
 
-    parts = [header, _trim(seg1), _trim(seg2), _trim(seg3), FOOTER_NOTE]
+    parts = [header, _trim(seg1), _trim(seg2), _trim(seg3), _trim(seg4), FOOTER_NOTE]
     return "\n\n".join(parts)
 
 
@@ -1041,6 +1175,8 @@ def main(argv=None) -> int:
                         help="忽略当日去重锁，强制推送（用于人工重发）")
     parser.add_argument("--lock-file", default=LOCK_FILE,
                         help=f"去重锁文件路径（默认 {LOCK_FILE}）")
+    parser.add_argument("--snapshot-file", default=SNAPSHOT_FILE,
+                        help=f"版本快照文件路径（第四段比对基准，默认 {SNAPSHOT_FILE}）")
     parser.add_argument("--dry-run", action="store_true", help="只校验不推送")
     parser.add_argument("--save-json", help="把本次拉取的 range-data 存到该路径，便于回放")
     args = parser.parse_args(argv)
@@ -1078,7 +1214,12 @@ def main(argv=None) -> int:
     ))
 
     # 2) 校验
-    result = check_rows(cells, cols)
+    prev_snapshot = load_snapshot(args.snapshot_file)
+    result = check_rows(cells, cols, prev_snapshot=prev_snapshot)
+    if result.get("chg_compare_enabled"):
+        print("版本比对：已加载上一版本快照，第四段【变更与合规】已启用。")
+    else:
+        print("版本比对：无上一版本快照（首次运行）或「更新列内容」列缺失，第四段跳过。")
     has_biz_issue = bool(result["owner_map"] or result["no_owner_rows"])
     has_tech_issue = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
@@ -1088,6 +1229,7 @@ def main(argv=None) -> int:
         result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
         result["acc_redo"], result["acc_undecided"], result["acc_leader"],
     ])
+    has_chg_issue = any([result.get("chg_update"), result.get("chg_invalid")])
     print(f"有效需求条数：{result['total']}")
     print("── 一、需求收集阶段（业务组）──")
     print(f"异常行数：{len(result['abnormal'])}")
@@ -1111,8 +1253,11 @@ def main(argv=None) -> int:
     print(f"规则4 验收不通过待优化：{sum(len(v) for v in result['acc_redo'].values())} 行")
     print(f"规则5 待确认需求方案：{sum(len(v) for v in result['acc_undecided'].values())} 行")
     print(f"规则6 需领导决策：{len(result['acc_leader'])} 行")
+    print("── 四、变更与合规（第四段）──")
+    print(f"变更列内容提醒：{sum(len(v) for v in result.get('chg_update', {}).values())} 行")
+    print(f"不合规修改开发完成时间：{sum(len(v) for v in result.get('chg_invalid', {}).values())} 行")
 
-    # 3) 渲染（三段式；三段全无异常时走简化版：仅表头 + 小红花）
+    # 3) 渲染（四段式；四段均无异常时仍推送，走「简化版」仅表头 + 小红花）
     message = render_message(result, args.table_url)
 
     print("\n" + "=" * 60)
@@ -1123,8 +1268,15 @@ def main(argv=None) -> int:
             ("一、需求收集阶段异常", has_biz_issue),
             ("二、技术评估/开发阶段异常", has_tech_issue),
             ("三、验收上线阶段异常", has_acc_issue),
-        ) if ok] or ["三段均无异常（简化版：仅表头 + 小红花）"]
+            ("四、变更与合规异常", has_chg_issue),
+        ) if ok] or ["四段均无异常（简化版：仅表头 + 小红花）"]
     ))
+
+    # 3.5) 回写版本快照（「知识库」更新为本次最新版本），供下一轮比对。
+    #      无论是否推送、是否 dry-run 都回写，保证基准持续推进。
+    save_snapshot(result.get("cur_snapshot") or {}, args.snapshot_file)
+    if result.get("cur_snapshot"):
+        print(f"   已回写版本快照：{args.snapshot_file}（下一轮以此为基准）")
 
     # 4) 推送（含「当日只推一次」去重保护）
     if args.dry_run or not args.webhook:
