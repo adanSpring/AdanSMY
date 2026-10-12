@@ -24,7 +24,7 @@ D2 不合规操作通报 —— 仍比对上一版本，「评估开发完成时
 
 第一段：业务组填写完整性
 ------------------------
-1. 必填项：系统名称、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期
+1. 必填项：需求编号、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期
 2. 至少填一项：业务背景与痛点、需求描述与业务价值
 逐行检查，不满足任一条即为异常。
 - 异常行若「需求负责人」有值 → 按负责人合并成一行，同行艾特并带行号后缀：
@@ -38,11 +38,12 @@ D2 不合规操作通报 —— 仍比对上一版本，「评估开发完成时
 涉及列（全部按「表头名称」定位，见下方「列定位」说明）：
     技术对接人、评估结果/排期结论、评估开发完成时间、逾期状态、技术组测试结果、技术组说明备注
 1. 技术对接人：必须有人名，无人名 → 「@敦志勇  共x条需求，仍未设定技术对接人（第…行）；」
-2. 评估结果/排期结论：仅支持「评估通过 / 评估不通过」；未填/填错 → 异常
+2. 评估结果/排期结论：仅支持「评估通过 / 评估不通过 / 方案确认中」；未填/填错 → 异常
    2.1 未填 且 技术对接人有值 且 (now - 提出日期 >= 24h) → 「@（技术对接人）：有x条需求，仍未反馈技术开发评估结果（第…行）；」
    2.2 未填 且 技术对接人有值 且 (now - 提出日期 < 24h)  → 不抛异常
-   2.3 填错 且 技术对接人有值 → 「@（技术对接人）：有x条需求，请按表格格式填写（第…行）；」
-   2.4 技术对接人无值的行 → 跳过
+   2.3 填「方案确认中」且 技术对接人有值 且 (now - 提出日期 >= 24h) → 「@（技术对接人）：有x条需求，请尽快确认需求开发方案（第…行）；」
+   2.4 填错 且 技术对接人有值 → 「@（技术对接人）：第x条需求，请按表格格式填写；」
+   2.5 技术对接人无值的行 → 跳过
 3. 评估开发完成时间：**仅当「评估结果/排期结论」=「评估通过」时**才必填，缺 → 「@（技术对接人）：有x条需求，仍未评估完成时间（第…行）；」
    （评估不通过的需求本就无需排期完成时间，不再报异常）
 4. 逾期状态：若 评估开发完成时间 有值 且 技术组测试结果 ≠ 通过，
@@ -151,7 +152,7 @@ DEFAULT_FILE_ID = "2yRGboxQH9MLz2kbTHNErx8PtTCNR8GcJ"
 
 # 字段名（内部键）→ 表头文案（必须与表格中的表头文字完全一致）
 FIELD_HEADERS = {
-    "system":     "系统名称",
+    "system":     "需求编号",
     "module":     "所属系统/模块",
     "branch":     "提出分公司",
     "proposer":   "需求提出人",
@@ -216,7 +217,8 @@ TECH_AT_OVERDUE = ["敦志勇", "逄浩"]   # 规则4：逾期，艾特敦志勇
 # 评估结果/排期结论 允许的取值
 EVAL_RESULT_OK = "评估通过"
 EVAL_RESULT_FAIL = "评估不通过"
-EVAL_RESULT_ALLOWED = {EVAL_RESULT_OK, EVAL_RESULT_FAIL}
+EVAL_RESULT_PENDING = "方案确认中"
+EVAL_RESULT_ALLOWED = {EVAL_RESULT_OK, EVAL_RESULT_FAIL, EVAL_RESULT_PENDING}
 
 # 技术组测试结果「通过」的判定值（用于规则4：不为通过才可能逾期）
 TECH_TEST_PASS_VALUES = {"通过", "UAT通过", "测试通过"}
@@ -647,7 +649,8 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
     # 技术组异常累积容器
     tech_missing_tech = []          # 规则1：无技术对接人 → [excel_row]
     tech_no_eval = []               # 规则2.1：未填评估结果且超24h → [(excel_row, tech)]
-    tech_bad_eval = []              # 规则2.3：填错评估结果 → [(excel_row, tech)]
+    tech_confirm_plan = []          # 规则2.3：填「方案确认中」且超24h → [(excel_row, tech)]
+    tech_bad_eval = []              # 规则2.4：填错评估结果 → [(excel_row, tech)]
     tech_no_done = []               # 规则3：缺评估完成时间 → [(excel_row, tech)]
     tech_overdue = []               # 规则4：逾期 → [excel_row]
     tech_reject = []                # 规则5：评审不通过 → [(excel_row, tech, note)]
@@ -716,8 +719,15 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
                     if elapsed_h >= EVAL_REMIND_HOURS:
                         tech_no_eval.append((excel_row, tech))
                 # 若提出日期缺失/无法解析：无法判断 24h，按宽松处理不催办
+            elif eval_result == EVAL_RESULT_PENDING:
+                # 规则2.3：填写值为「方案确认中」且满 24h → 催确认需求开发方案
+                # （未满 24h 不抛异常）
+                if propose_date is not None:
+                    elapsed_h = (now - propose_date).total_seconds() / 3600.0
+                    if elapsed_h >= EVAL_REMIND_HOURS:
+                        tech_confirm_plan.append((excel_row, tech))
             elif not eval_valid:
-                # 规则2.3：填错
+                # 规则2.4：填错
                 tech_bad_eval.append((excel_row, tech))
             else:
                 # 规则3：**仅当「评估结果 = 评估通过」时**才要求填评估完成时间。
@@ -867,6 +877,7 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
         # 技术组
         "tech_missing_tech": tech_missing_tech,
         "tech_no_eval": _group_tech(tech_no_eval),
+        "tech_confirm_plan": _group_tech(tech_confirm_plan),
         "tech_bad_eval": _group_tech(tech_bad_eval),
         "tech_no_done": _group_tech(tech_no_done),
         "tech_overdue": tech_overdue,
@@ -928,7 +939,7 @@ def _render_collect(result: dict) -> str:
     lines += [
         "",
         "■ 异常检查规则",
-        "必填项：系统名称、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期；",
+        "必填项：需求编号、所属系统/模块、提出分公司、需求提出人、需求负责人、需求优先级、提出日期；",
         "至少填一项：业务背景与痛点、需求描述与业务价值；",
     ]
     return "\n".join(lines)
@@ -944,8 +955,9 @@ def _render_tech_stage(result: dict) -> str:
     lines = ["二、【技术评估/开发阶段】异常通报"]
 
     has_any = any([
-        result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
-        result["tech_no_done"], result["tech_overdue"], result["tech_reject"],
+        result["tech_missing_tech"], result["tech_no_eval"], result["tech_confirm_plan"],
+        result["tech_bad_eval"], result["tech_no_done"], result["tech_overdue"],
+        result["tech_reject"],
     ])
     if not has_any:
         # 标题紧跟小红花（保持与有异常场景「标题后直接接内容」一致）
@@ -959,13 +971,18 @@ def _render_tech_stage(result: dict) -> str:
         rows = result["tech_missing_tech"]
         lines.append(f"@{TECH_AT_NOMISS}  共{len(rows)}条需求，仍未设定技术对接人{_rows_suffix(rows)}；")
 
-    # 规则2.1：未反馈评估结果 → 「@技术对接人：有N条需求，仍未反馈技术开发评估结果（第x、y条）；」
+    # 规则2.1：未反馈评估结果 → 「@技术对接人：有N条需求，仍未反馈技术开发评估结果（第x、y行）；」
     for t, rows in result["tech_no_eval"].items():
         lines.append(f"@{t}：有{len(rows)}条需求，仍未反馈技术开发评估结果{_rows_suffix(rows)}；")
 
-    # 规则2.3：评估结果填错 → 带行号
+    # 规则2.3：评估结果=方案确认中 且 满24h → 「@技术对接人：有N条需求，请尽快确认需求开发方案（第x、y行）；」
+    for t, rows in result["tech_confirm_plan"].items():
+        lines.append(f"@{t}：有{len(rows)}条需求，请尽快确认需求开发方案{_rows_suffix(rows)}；")
+
+    # 规则2.4：评估结果填错 → 「@技术对接人：第x条需求，请按表格格式填写；」（单条格式）
     for t, rows in result["tech_bad_eval"].items():
-        lines.append(f"@{t}：有{len(rows)}条需求，请按表格格式填写{_rows_suffix(rows)}；")
+        for r in rows:
+            lines.append(f"@{t}：第{r}条需求，请按表格格式填写；")
 
     # 规则3：缺评估完成时间 → 带行号
     for t, rows in result["tech_no_done"].items():
@@ -1126,8 +1143,9 @@ def render_message(result: dict, table_url: str) -> str | None:
     # 判定三段是否全无异常
     has_collect = bool(result["owner_map"] or result["no_owner_rows"])
     has_tech = any([
-        result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
-        result["tech_no_done"], result["tech_overdue"], result["tech_reject"],
+        result["tech_missing_tech"], result["tech_no_eval"], result["tech_confirm_plan"],
+        result["tech_bad_eval"], result["tech_no_done"], result["tech_overdue"],
+        result["tech_reject"],
     ])
     has_acc = any([
         result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
@@ -1301,8 +1319,9 @@ def main(argv=None) -> int:
               "（D1 不受影响：无快照时按「无变化」处理，含「YC已更新」不报，不含则报）。")
     has_biz_issue = bool(result["owner_map"] or result["no_owner_rows"])
     has_tech_issue = any([
-        result["tech_missing_tech"], result["tech_no_eval"], result["tech_bad_eval"],
-        result["tech_no_done"], result["tech_overdue"], result["tech_reject"],
+        result["tech_missing_tech"], result["tech_no_eval"], result["tech_confirm_plan"],
+        result["tech_bad_eval"], result["tech_no_done"], result["tech_overdue"],
+        result["tech_reject"],
     ])
     has_acc_issue = any([
         result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
@@ -1319,6 +1338,7 @@ def main(argv=None) -> int:
     print("── 二、技术评估/开发阶段（技术组）──")
     print(f"未设技术对接人：{len(result['tech_missing_tech'])} 行")
     print(f"未反馈评估结果：{sum(len(v) for v in result['tech_no_eval'].values())} 行")
+    print(f"方案确认中：{sum(len(v) for v in result['tech_confirm_plan'].values())} 行")
     print(f"评估结果填错：{sum(len(v) for v in result['tech_bad_eval'].values())} 行")
     print(f"缺评估完成时间：{sum(len(v) for v in result['tech_no_done'].values())} 行")
     print(f"已逾期：{len(result['tech_overdue'])} 行")
