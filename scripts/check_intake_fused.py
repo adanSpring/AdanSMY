@@ -52,6 +52,11 @@ D2 不合规操作通报 —— 仍比对上一版本，「评估开发完成时
 5. 技术组说明备注：若 评估结果/排期结论 = 评估不通过 **且 技术组说明备注为空**
    → 「@（技术对接人）：有x条评审不通过的需求，请明确备注说明（第…行）；」
    （已填备注说明的需求不再催办）
+6. 开发完成时间合理性（2026-10-29 新增）：依据同表 sheet「机制说明与SLA」的优先级承诺输出，
+   基线 = 提出日期 + n 个工作日（n=7），按优先级放大允许多排周期：
+   P0/P1 → n；P2 → 2n；P3 → 3n；P4 不设上限；优先级缺失按 P3（最宽松）。
+   评估完成时间 晚于上限 且 技术组测试结果≠通过（未交付才判） → 不合理
+   → 「@（技术对接人）：有x条需求开发完成时间不合理，请重新评估（第…行）；」
 - 有技术对接人 → 统一汇总，同一人只出现一次；每条同行艾特 + 行号后缀
 - 技术对接人姓名做尾随数字归一化（「沈腾1」→「沈腾」），避免同一人被拆成两个 @对象
 
@@ -132,7 +137,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ── 默认配置 ────────────────────────────────────────────────
 DEFAULT_TABLE_URL = "https://www.kdocs.cn/l/cchYxqp30FkG"
@@ -234,8 +239,59 @@ OVERDUE_EXCLUDE_VALUES = {"未逾期", "未超期", "否", "N", "no", "No", "NO"
 # 只剥「末尾的纯数字」，不影响「张婉妮/刘新英」这类斜杠多人写法。
 TECH_NAME_STRIP_TAIL_DIGITS = True
 
+# 技术对接人「多人写法」拆分（2026-10-29 确认）：
+# 单元格内的符号（/ 、 , ， & + 和 与）均为**间隔符**，表示该需求多人协作。
+# 拆分后逐人归一化（剥尾随数字），异常归属时**分别艾特每一个人**，
+# 不再出现「刘新英/张婉妮」这类复合 @对象。
+TECH_NAME_SEPARATORS = re.compile(r"[/、,，&+]|和|与")
+
+
+def split_tech_names(value) -> list[str]:
+    """把「技术对接人」单元格拆成逐人名单：按间隔符拆分 + 尾随数字归一化。
+
+    「刘新英/张婉妮」→ ["刘新英", "张婉妮"]；空值 → []。
+    """
+    text = norm(value)
+    if not text:
+        return []
+    names = []
+    for part in TECH_NAME_SEPARATORS.split(text):
+        name = norm_tech_name(part)
+        if name and name not in names:
+            names.append(name)
+    return names
+
 # 规则2.1 的时间阈值：提出日期距现在 >= 24h 才催评估结果
 EVAL_REMIND_HOURS = 24
+
+# ―― 规则6【开发完成时间合理性】（2026-10-29 新增）――
+# 口径来源：同表 sheet「机制说明与SLA」一、优先级定义与响应/交付时效(SLA) 的「承诺输出」列：
+#   P0：当日锁排期 + 2h 兜底      P1：3 个工作日内
+#   P2：5 个工作日内              P3：7 个工作日内
+#   P4：7 个工作日以上（时间弹性高）
+# 计算口径：
+#   基线 = 提出日期 + n 个工作日（n = SLA_BASE_UNIT_DAYS，当前取 7，即「最小单元周期」）
+#   允许多排 = 基线 + 优先级系数 × n，即：
+#     P0/P1 → 提出日期 + n 个工作日（要求最紧）
+#     P2    → 提出日期 + 2n 个工作日
+#     P3    → 提出日期 + 3n 个工作日（= 21 个工作日）
+#     P4    → 不设上限（弹性高，不判不合理）
+#   判定：有评估完成时间 且 评估完成时间 > 允许上限（且该行「技术组测试结果」不为通过，
+#         即未交付的行才判；已测试通过说明评估已兑现，不再追溯）→ 不合理。
+#   优先级缺失/无法识别 → 按最宽松的 P3 处理（不误报）；
+#   提出日期缺失/无法解析 → 跳过（无法判定）。
+SLA_BASE_UNIT_DAYS = 7
+# 优先级 → 允许的工作日倍率（相对 n）；None = 不设上限
+SLA_PRIORITY_MULTIPLIER = {
+    "P0": 1,
+    "P1": 1,
+    "P2": 2,
+    "P3": 3,
+    "P4": None,
+}
+SLA_DEFAULT_PRIORITY = "P3"
+# 优先级取值归一化：先取「P+数字」主干（兼容「P1 严重级」「p2级」等写法）
+SLA_PRIORITY_RE = re.compile(r"P\s*([0-4])", re.IGNORECASE)
 
 # 无需求负责人的异常行：消息开头额外艾特的跟进人（2026-09-24 新增规则）
 NO_OWNER_AT = "原潮"
@@ -594,6 +650,31 @@ def fetch_with_fallback(table_url: str, sheet_id: int,
 
 
 # ── 核心校验 ────────────────────────────────────────────────
+def _add_workdays(start: datetime, days: int) -> datetime:
+    """自然日基础上顺延：跳过周六/周日（工作日口径，不含法定节假日表）。"""
+    cur = start
+    added = 0
+    while added < days:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:      # 0=周一 … 4=周五
+            added += 1
+    return cur
+
+
+def _sla_limit_date(propose_date: datetime, priority_text: str,
+                    unit_days: int = SLA_BASE_UNIT_DAYS) -> datetime | None:
+    """按「提出日期 + 优先级 × 最小单元周期 n」算出允许的最晚评估完成时间。
+
+    返回 None 表示不设上限（P4 或无法识别的优先级按最宽松处理前的判断由调用方决定）。
+    """
+    m = SLA_PRIORITY_RE.search(norm(priority_text))
+    level = f"P{m.group(1)}" if m else SLA_DEFAULT_PRIORITY
+    mult = SLA_PRIORITY_MULTIPLIER.get(level)
+    if mult is None:
+        return None                     # P4：时间弹性高，不设上限
+    return _add_workdays(propose_date, unit_days * mult)
+
+
 def _parse_date(text: str) -> datetime | None:
     """尽力解析提出日期。支持 2026-09-20 / 2026/9/20 / 2026.09.20 等。"""
     text = norm(text)
@@ -654,6 +735,7 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
     tech_no_done = []               # 规则3：缺评估完成时间 → [(excel_row, tech)]
     tech_overdue = []               # 规则4：逾期 → [excel_row]
     tech_reject = []                # 规则5：评审不通过 → [(excel_row, tech, note)]
+    tech_unreasonable = []          # 规则6：开发完成时间不合理 → [(excel_row, tech, 允许上限日期)]
     # ―― 验收上线阶段 异常累积容器 ――
     # 每条异常记为 (excel_row, at_name, text)，at_name 为应@的人（负责人/技术对接人/原潮兜底）
     acc_wait_accept = []            # 规则1：测试通过但未验收 → [(row, at, owner)]
@@ -684,13 +766,16 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
         excel_row = row_idx + 1        # 0-based → Excel 真实行号
 
         owner = norm(row.get(c_owner, ""))
-        tech = norm_tech_name(row.get(c_tech, ""))      # 尾随数字归一化（沈腾1→沈腾）
+        # 多人写法拆分：「刘新英/张婉妮」→ [刘新英, 张婉妮]，异常分别归属每一个人
+        tech_names = split_tech_names(row.get(c_tech, ""))
+        tech = tech_names[0] if tech_names else ""      # 兼容旧逻辑的「是否有对接人」判断
         eval_result = norm(row.get(c_eval_result, ""))
         eval_done = norm(row.get(c_eval_done, ""))
         overdue_val = norm(row.get(c_overdue, ""))
         tech_test = norm(row.get(c_tech_test, ""))
         tech_note = norm(row.get(c_tech_note, ""))
         propose_date = _parse_date(row.get(c_date, ""))
+        priority_text = norm(row.get(cols["priority"], ""))
 
         # ── 模块 A：业务组填写完整性 ──
         missing = []
@@ -704,11 +789,11 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
 
         # ── 模块 B：技术组填报异常 ──
         # 规则1：技术对接人必须有人名
-        if not tech:
+        if not tech_names:
             tech_missing_tech.append(excel_row)
 
         # 规则2 / 3 / 4 / 5：仅在「有技术对接人」时判定（规则2.4 无对接人则跳过）
-        if tech:
+        if tech_names:
             eval_filled = eval_result != ""
             eval_valid = eval_result in EVAL_RESULT_ALLOWED
 
@@ -717,7 +802,8 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
                 if propose_date is not None:
                     elapsed_h = (now - propose_date).total_seconds() / 3600.0
                     if elapsed_h >= EVAL_REMIND_HOURS:
-                        tech_no_eval.append((excel_row, tech))
+                        for t in tech_names:
+                            tech_no_eval.append((excel_row, t))
                 # 若提出日期缺失/无法解析：无法判断 24h，按宽松处理不催办
             elif eval_result == EVAL_RESULT_PENDING:
                 # 规则2.3：填写值为「方案确认中」且满 24h → 催确认需求开发方案
@@ -725,15 +811,18 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
                 if propose_date is not None:
                     elapsed_h = (now - propose_date).total_seconds() / 3600.0
                     if elapsed_h >= EVAL_REMIND_HOURS:
-                        tech_confirm_plan.append((excel_row, tech))
+                        for t in tech_names:
+                            tech_confirm_plan.append((excel_row, t))
             elif not eval_valid:
                 # 规则2.4：填错
-                tech_bad_eval.append((excel_row, tech))
+                for t in tech_names:
+                    tech_bad_eval.append((excel_row, t))
             else:
                 # 规则3：**仅当「评估结果 = 评估通过」时**才要求填评估完成时间。
                 # 「评估不通过」的需求本就无需排期完成时间，不再因此报异常。
                 if eval_result == EVAL_RESULT_OK and not eval_done:
-                    tech_no_done.append((excel_row, tech))
+                    for t in tech_names:
+                        tech_no_done.append((excel_row, t))
 
             # 规则4：有评估完成时间 且 技术组测试结果不为通过 → 再看逾期状态
             # 判定：逾期状态「有值」且「不等于未逾期」才算逾期。
@@ -744,7 +833,21 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
             # 规则5：评估结果 = 评估不通过 **且「技术组说明备注」为空** → 异常
             # （填了备注说明的不再催办，避免已说明原因的需求被反复提醒）
             if eval_result == EVAL_RESULT_FAIL and tech_note == "":
-                tech_reject.append((excel_row, tech, tech_note))
+                for t in tech_names:
+                    tech_reject.append((excel_row, t, tech_note))
+
+            # 规则6：开发完成时间合理性（基于提出日期 + 需求优先级 + SLA 最小单元周期 n）
+            #   · 只判「有评估完成时间」的行；无值由规则3（评估通过却未填）兜底
+            #   · 已「技术组测试结果=通过」的行视为评估已兑现，不再追溯判不合理
+            #   · 优先级 P4 / 无法识别 → 不设上限；提出日期无法解析 → 跳过
+            if eval_done and tech_test not in TECH_TEST_PASS_VALUES and propose_date is not None:
+                done_date = _parse_date(eval_done)
+                limit_date = _sla_limit_date(propose_date, priority_text)
+                if done_date is not None and limit_date is not None and done_date > limit_date:
+                    for t in tech_names:
+                        tech_unreasonable.append(
+                            (excel_row, t, limit_date.strftime("%Y-%m-%d"))
+                        )
 
         # ── 模块 C：验收上线阶段（业务开发清单验收）──
         accept_result = norm(row.get(c_accept_result, ""))
@@ -771,7 +874,8 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
             acc_no_note.append((excel_row, owner or NO_OWNER_AT, owner))
         # 规则4：验收结果=不通过 且 评估结果=评估通过 → @技术对接人
         if is_accept_fail and is_eval_pass:
-            acc_redo.append((excel_row, tech or NO_OWNER_AT, tech))
+            for t in (tech_names or [NO_OWNER_AT]):
+                acc_redo.append((excel_row, t, t))
         # 规则5：评估结果=评估不通过 且 验收结果∉{通过,不通过} → @需求负责人
         if is_eval_fail and not is_accept_pass and not is_accept_fail:
             acc_undecided.append((excel_row, owner or NO_OWNER_AT, owner))
@@ -814,7 +918,8 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
             update_col = norm(row.get(c_update_col, "")) if c_update_col is not None else ""
             if eval_done != prev_done and prev_done != "" \
                     and YC_UPDATED_TOKEN not in update_col:
-                chg_invalid.append((excel_row, tech or NO_OWNER_AT, tech))
+                for t in (tech_names or [NO_OWNER_AT]):
+                    chg_invalid.append((excel_row, t, t))
 
         # 记录本轮快照（无论是否可比对，都持续更新为最新版本）
         if c_update_col is not None:
@@ -882,6 +987,8 @@ def check_rows(cells, cols: dict, now: datetime | None = None,
         "tech_no_done": _group_tech(tech_no_done),
         "tech_overdue": tech_overdue,
         "tech_reject": _group_tech([(r, t) for r, t, _ in tech_reject]),
+        "tech_unreasonable": _group_tech([(r, t) for r, t, _ in tech_unreasonable]),
+        "tech_unreasonable_detail": tech_unreasonable,   # [(行, 对接人, 允许上限)]
         # 验收上线阶段
         "acc_stats": acc_stats,
         "acc_wait_accept": _group_acc(acc_wait_accept),
@@ -957,7 +1064,7 @@ def _render_tech_stage(result: dict) -> str:
     has_any = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_confirm_plan"],
         result["tech_bad_eval"], result["tech_no_done"], result["tech_overdue"],
-        result["tech_reject"],
+        result["tech_reject"], result.get("tech_unreasonable"),
     ])
     if not has_any:
         # 标题紧跟小红花（保持与有异常场景「标题后直接接内容」一致）
@@ -997,6 +1104,10 @@ def _render_tech_stage(result: dict) -> str:
     # 规则5：评审不通过 → 带行号
     for t, rows in result["tech_reject"].items():
         lines.append(f"@{t}：有{len(rows)}条评审不通过的需求，请明确备注说明{_rows_suffix(rows)}；")
+
+    # 规则6：开发完成时间不合理 → 「@技术对接人：有N条需求开发完成时间不合理，请重新评估（第x、y行）；」
+    for t, rows in (result.get("tech_unreasonable") or {}).items():
+        lines.append(f"@{t}：有{len(rows)}条需求开发完成时间不合理，请重新评估{_rows_suffix(rows)}；")
 
     return "\n".join(lines)
 
@@ -1145,7 +1256,7 @@ def render_message(result: dict, table_url: str) -> str | None:
     has_tech = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_confirm_plan"],
         result["tech_bad_eval"], result["tech_no_done"], result["tech_overdue"],
-        result["tech_reject"],
+        result["tech_reject"], result.get("tech_unreasonable"),
     ])
     has_acc = any([
         result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
@@ -1321,7 +1432,7 @@ def main(argv=None) -> int:
     has_tech_issue = any([
         result["tech_missing_tech"], result["tech_no_eval"], result["tech_confirm_plan"],
         result["tech_bad_eval"], result["tech_no_done"], result["tech_overdue"],
-        result["tech_reject"],
+        result["tech_reject"], result.get("tech_unreasonable"),
     ])
     has_acc_issue = any([
         result["acc_wait_accept"], result["acc_confirm_online"], result["acc_no_note"],
@@ -1343,6 +1454,7 @@ def main(argv=None) -> int:
     print(f"缺评估完成时间：{sum(len(v) for v in result['tech_no_done'].values())} 行")
     print(f"已逾期：{len(result['tech_overdue'])} 行")
     print(f"评审不通过：{sum(len(v) for v in result['tech_reject'].values())} 行")
+    print(f"开发完成时间不合理：{sum(len(v) for v in result.get('tech_unreasonable', {}).values())} 行")
     print("── 三、验收上线阶段（业务开发清单验收）──")
     s = result["acc_stats"]
     print(f"验收结果清单：总计 {s['total']} 条，已通过 {s['pass']}，验收中 {s['pending']}，不通过 {s['fail']}")
